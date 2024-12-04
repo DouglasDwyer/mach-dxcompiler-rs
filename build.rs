@@ -26,6 +26,7 @@ fn main() {
 #[cfg(feature = "cbindings")]
 fn generate_bindings() {
     let bindings = bindgen::Builder::default()
+        .rust_target(bindgen::RustTarget::Stable_1_73)
         // The input header we would like to generate
         // bindings for.
         .header("mach_dxc.h")

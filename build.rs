@@ -8,30 +8,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// The GitHub repository that hosts the prebuilt `mach-dxcompiler` releases.
+/// Owner of the GitHub repository hosting the prebuilt `mach-dxcompiler` releases.
 const RELEASE_REPO_OWNER: &str = "DouglasDwyer";
-/// The name of the repository that hosts the prebuilt `mach-dxcompiler` releases.
+/// Name of the GitHub repository hosting the prebuilt `mach-dxcompiler` releases.
 const RELEASE_REPO_NAME: &str = "mach-dxcompiler";
-/// The release tag from which the prebuilt binaries are downloaded.
+/// Release tag the prebuilt binaries are downloaded from.
 const RELEASE_TAG: &str = "2024.11.22+284d956.1";
 
-/// Lowercase hex SHA-256 digests of the prebuilt release archives for [`RELEASE_TAG`].
-///
-/// Each key is a release asset name without the `.tar.gz` suffix (see
-/// [`get_target_artifact`]); each value is the expected SHA-256 of that archive. The
-/// downloaded archive is checked against this table before it is linked, so a build
-/// fails loudly if a release asset is ever replaced with different bytes.
-///
-/// These MUST be refreshed whenever [`RELEASE_TAG`] changes. For an immutable release
-/// GitHub publishes the digests itself, so they can be copied straight from the API:
-///
-/// ```text
-/// gh api "repos/DouglasDwyer/mach-dxcompiler/releases/tags/<TAG>" \
-///     --jq '.assets[] | select(.name | endswith(".tar.gz")) | [ (.name | rtrimstr(".tar.gz")), .digest ] | @tsv'
-/// ```
-///
-/// (the API reports each digest as `sha256:<hex>`). Otherwise download each asset and
-/// hash it locally with `sha256sum` / `shasum -a 256`.
+/// Expected lowercase-hex SHA-256 of each prebuilt release archive for [`RELEASE_TAG`],
+/// keyed by asset name without the `.tar.gz` suffix. Refresh these whenever
+/// [`RELEASE_TAG`] changes; for an immutable release they can be copied from the
+/// `digest` field of the GitHub releases API.
 #[cfg(feature = "verify_checksum")]
 const RELEASE_CHECKSUMS: &[(&str, &str)] = &[
     (
@@ -78,10 +65,9 @@ const RELEASE_CHECKSUMS: &[(&str, &str)] = &[
 
 /// A prebuilt release archive to download and link.
 struct ReleaseArtifact {
-    /// The URL the `.tar.gz` archive is downloaded from.
+    /// URL of the `.tar.gz` archive.
     url: String,
-    /// The release asset name (without the `.tar.gz` suffix), used for diagnostics
-    /// and to look the archive up in [`RELEASE_CHECKSUMS`].
+    /// Asset name without the `.tar.gz` suffix, used to look the archive up in [`RELEASE_CHECKSUMS`].
     #[cfg_attr(not(feature = "verify_checksum"), allow(dead_code))]
     asset_name: String,
 }
@@ -95,7 +81,7 @@ fn main() {
     #[cfg(all(feature = "msvc_version_validation", target_env = "msvc"))]
     validate_msvc_version();
     #[cfg(feature = "verify_immutable_release")]
-    verify_release_is_immutable(RELEASE_REPO_OWNER, RELEASE_REPO_NAME, RELEASE_TAG);
+    verify_release_is_immutable();
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("Failed to get OUT_DIR environment"));
     let artifact = get_target_artifact(static_crt());
     let file_path = out_dir.join("machdxcompiler.tar.gz");
@@ -171,22 +157,16 @@ fn validate_msvc_version() {
     }
 }
 
-/// Verifies that the GitHub release being downloaded is an [immutable release].
-///
-/// Immutable releases guarantee that the release assets and tag cannot be altered
-/// after publication. Without this guarantee the prebuilt native binaries could be
-/// swapped out at any time, letting downstream builds silently incorporate
-/// attacker-controlled native code without any change to the Rust source or
-/// `Cargo.lock`.
-///
-/// Panics if the release is not immutable, or if its immutability status cannot be
-/// determined by querying the GitHub REST API.
+/// Verifies that [`RELEASE_TAG`] is an [immutable release], so its assets cannot be
+/// swapped out after publication. Panics if the release is not immutable or its status
+/// cannot be determined via the GitHub REST API.
 ///
 /// [immutable release]: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases
 #[cfg(feature = "verify_immutable_release")]
-fn verify_release_is_immutable(repo_owner: &str, repo_name: &str, tag: &str) {
-    let api_url =
-        format!("https://api.github.com/repos/{repo_owner}/{repo_name}/releases/tags/{tag}");
+fn verify_release_is_immutable() {
+    let api_url = format!(
+        "https://api.github.com/repos/{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}/releases/tags/{RELEASE_TAG}"
+    );
 
     let mut command = Command::new("curl");
     command
@@ -199,10 +179,9 @@ fn verify_release_is_immutable(repo_owner: &str, repo_name: &str, tag: &str) {
         .arg("--header")
         .arg("X-GitHub-Api-Version: 2022-11-28")
         .arg("--user-agent")
-        .arg("mach-dxcompiler-rs-build-script");
+        .arg("mach-dxcompiler-rs-build-script")
+        .arg(&api_url);
 
-    // Authenticate when a token is available so CI builds are not blocked by the
-    // low unauthenticated GitHub API rate limit.
     if let Some(token) = env::var("GITHUB_TOKEN")
         .or_else(|_| env::var("GH_TOKEN"))
         .ok()
@@ -214,7 +193,6 @@ fn verify_release_is_immutable(repo_owner: &str, repo_name: &str, tag: &str) {
     }
 
     let output = command
-        .arg(&api_url)
         .output()
         .expect("Failed to start Curl to query the GitHub releases API");
     if !output.status.success() {
@@ -230,23 +208,18 @@ fn verify_release_is_immutable(repo_owner: &str, repo_name: &str, tag: &str) {
 
     if !release_json_is_immutable(&body) {
         panic!(
-            "Refusing to download a mutable GitHub release.\n\
-             \n\
-             The release `{tag}` of `{repo_owner}/{repo_name}` is not an immutable release, so its \
-             assets could be replaced after publication without any change to this crate's source \
-             (https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).\n\
-             \n\
-             A new immutable release must be published and referenced by this crate before it can \
-             be built. To bypass this check at your own risk, disable the default \
-             `verify_immutable_release` feature of `mach-dxcompiler-rs`."
+            "Refusing to download a mutable GitHub release.\n\n\
+             `{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}` release `{RELEASE_TAG}` is not an immutable \
+             release, so its assets could be replaced after publication without any change to this \
+             crate's source. Publish an immutable release and bump `RELEASE_TAG`, or disable the \
+             default `verify_immutable_release` feature to bypass this check.\n\
+             https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases"
         );
     }
 }
 
-/// Returns `true` if the GitHub release API JSON body reports `"immutable": true`.
-///
-/// The release payload is a flat JSON object, so this scans for the field directly
-/// rather than pulling a JSON parser into the build dependencies.
+/// Returns `true` if the release API JSON reports `"immutable": true`, scanning the
+/// flat payload directly to avoid a JSON-parser build dependency.
 #[cfg(feature = "verify_immutable_release")]
 fn release_json_is_immutable(body: &str) -> bool {
     let Some((_, after_key)) = body.split_once("\"immutable\"") else {
@@ -258,15 +231,10 @@ fn release_json_is_immutable(body: &str) -> bool {
     after_colon.trim_start().starts_with("true")
 }
 
-/// Verifies that the downloaded archive matches the SHA-256 digest pinned in
-/// [`RELEASE_CHECKSUMS`].
-///
-/// This pins the exact bytes of the prebuilt native library, so downstream builds
-/// cannot silently pick up a modified binary without a corresponding change to this
-/// crate's source.
-///
-/// Panics if no checksum is pinned for `asset_name`, if the archive cannot be read,
-/// or if its digest does not match.
+/// Verifies the downloaded archive against the SHA-256 digest pinned in
+/// [`RELEASE_CHECKSUMS`], pinning the exact native-binary bytes that get linked.
+/// Panics if no checksum is pinned for `asset_name`, the archive cannot be read, or
+/// the digest does not match.
 #[cfg(feature = "verify_checksum")]
 fn verify_checksum(file_path: &Path, asset_name: &str) {
     use sha2::{Digest, Sha256};
@@ -295,7 +263,6 @@ fn verify_checksum(file_path: &Path, asset_name: &str) {
     }
 
     if !actual.eq_ignore_ascii_case(expected) {
-        // Don't leave the untrusted archive lying around for the extract step.
         let _ = fs::remove_file(file_path);
         panic!(
             "Checksum mismatch for release asset `{asset_name}.tar.gz`.\n\

@@ -11,17 +11,21 @@ repository = "https://github.com/DouglasDwyer/mach-dxcompiler-rs"
 
 [build-dependencies]
 bindgen = { version = "0.71.1", optional = true, default-features = false, features = [ "runtime" ] }
+sha2 = { version = "0.10", optional = true }
 
 [target.'cfg(target_env = "msvc")'.build-dependencies]
 cc = { version = "1.2.3", optional = true }
 
 [features]
-default = ["msvc_version_validation", "verify_immutable_release"]
+default = ["msvc_version_validation", "verify_immutable_release", "verify_checksum"]
 cbindings = ["dep:bindgen"]
 msvc_version_validation = ["dep:cc"]
 # Verifies at build time that the downloaded GitHub release is an immutable release,
 # failing the build otherwise. See <https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases>.
 verify_immutable_release = []
+# Verifies at build time that the downloaded release archive matches the SHA-256
+# checksum pinned in build.rs, failing the build otherwise.
+verify_checksum = ["dep:sha2"]
 
 
 [package.metadata."docs.rs"]

@@ -15,6 +15,77 @@ const RELEASE_REPO_NAME: &str = "mach-dxcompiler";
 /// The release tag from which the prebuilt binaries are downloaded.
 const RELEASE_TAG: &str = "2024.11.22+284d956.1";
 
+/// Lowercase hex SHA-256 digests of the prebuilt release archives for [`RELEASE_TAG`].
+///
+/// Each key is a release asset name without the `.tar.gz` suffix (see
+/// [`get_target_artifact`]); each value is the expected SHA-256 of that archive. The
+/// downloaded archive is checked against this table before it is linked, so a build
+/// fails loudly if a release asset is ever replaced with different bytes.
+///
+/// These MUST be refreshed whenever [`RELEASE_TAG`] changes. For an immutable release
+/// GitHub publishes the digests itself, so they can be copied straight from the API:
+///
+/// ```text
+/// gh api "repos/DouglasDwyer/mach-dxcompiler/releases/tags/<TAG>" \
+///     --jq '.assets[] | select(.name | endswith(".tar.gz")) | [ (.name | rtrimstr(".tar.gz")), .digest ] | @tsv'
+/// ```
+///
+/// (the API reports each digest as `sha256:<hex>`). Otherwise download each asset and
+/// hash it locally with `sha256sum` / `shasum -a 256`.
+#[cfg(feature = "verify_checksum")]
+const RELEASE_CHECKSUMS: &[(&str, &str)] = &[
+    (
+        "x86_64-linux-gnu_ReleaseFast_lib",
+        "a1f3afc81b4806a248fa66639820d2f0834493fd487ffa621a2fee2ec7029fdf",
+    ),
+    (
+        "x86_64-linux-musl_ReleaseFast_lib",
+        "a7e1e6e0c7834a62345c089bcc8884842688a669ffb5b7c932cf4702e56c54e0",
+    ),
+    (
+        "aarch64-linux-gnu_ReleaseFast_lib",
+        "0f2a60cb362e6e274471c854d997872256d82d3e3cc416403499c875c6936b04",
+    ),
+    (
+        "aarch64-linux-musl_ReleaseFast_lib",
+        "b040850fcab3d886d9cb46fddfa584659fda28b425cab63cd854ce3597f25ebd",
+    ),
+    (
+        "x86_64-windows-gnu_ReleaseFast_lib",
+        "839a30779cfbd69fea6a65f76f2cc0d10e27bac1b4d54a2a18ec8c4c4f106101",
+    ),
+    (
+        "aarch64-windows-gnu_ReleaseFast_lib",
+        "63d9940b6f839cf80ab6196bb75af531fdacc24169df874a7c20e1fce0a46fb9",
+    ),
+    (
+        "x86_64-windows-msvc_ReleaseFast_lib",
+        "cc3ae4ede81cc0d9c212420c97d6c98a580acf116acbf1d62caed6f3fd1b1b16",
+    ),
+    (
+        "x86_64-windows-msvc_ReleaseFast_Dynamic_lib",
+        "b5e1a7dd3c2d57e1ac27a357003b39d1c58ecdac3d548aca0ef4127f2833d2e1",
+    ),
+    (
+        "x86_64-macos-none_ReleaseFast_lib",
+        "724a75552589e72d08a4dd752b930127b216b5451af5d86cad99a95e4df37240",
+    ),
+    (
+        "aarch64-macos-none_ReleaseFast_lib",
+        "9fc8cc0b0bc855d0a67a782145145e90a5ce70a130a2ae87d05eafa151896f91",
+    ),
+];
+
+/// A prebuilt release archive to download and link.
+struct ReleaseArtifact {
+    /// The URL the `.tar.gz` archive is downloaded from.
+    url: String,
+    /// The release asset name (without the `.tar.gz` suffix), used for diagnostics
+    /// and to look the archive up in [`RELEASE_CHECKSUMS`].
+    #[cfg_attr(not(feature = "verify_checksum"), allow(dead_code))]
+    asset_name: String,
+}
+
 /// Downloads and links the static DXC binary.
 fn main() {
     println!("cargo:rerun-if-changed=msvc_version.c");
@@ -26,9 +97,11 @@ fn main() {
     #[cfg(feature = "verify_immutable_release")]
     verify_release_is_immutable(RELEASE_REPO_OWNER, RELEASE_REPO_NAME, RELEASE_TAG);
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("Failed to get OUT_DIR environment"));
-    let target_url = get_target_url(static_crt());
+    let artifact = get_target_artifact(static_crt());
     let file_path = out_dir.join("machdxcompiler.tar.gz");
-    download_released_library(&target_url, &file_path);
+    download_released_library(&artifact.url, &file_path);
+    #[cfg(feature = "verify_checksum")]
+    verify_checksum(&file_path, &artifact.asset_name);
     extract_tar_gz(&file_path, &out_dir);
     #[cfg(feature = "cbindings")]
     generate_bindings();
@@ -185,8 +258,60 @@ fn release_json_is_immutable(body: &str) -> bool {
     after_colon.trim_start().starts_with("true")
 }
 
-/// Gets the URL from which the DXC binary should be downloaded.
-fn get_target_url(static_crt: bool) -> String {
+/// Verifies that the downloaded archive matches the SHA-256 digest pinned in
+/// [`RELEASE_CHECKSUMS`].
+///
+/// This pins the exact bytes of the prebuilt native library, so downstream builds
+/// cannot silently pick up a modified binary without a corresponding change to this
+/// crate's source.
+///
+/// Panics if no checksum is pinned for `asset_name`, if the archive cannot be read,
+/// or if its digest does not match.
+#[cfg(feature = "verify_checksum")]
+fn verify_checksum(file_path: &Path, asset_name: &str) {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+
+    let expected = RELEASE_CHECKSUMS
+        .iter()
+        .find_map(|(name, sha)| (*name == asset_name).then_some(*sha))
+        .unwrap_or_else(|| {
+            panic!(
+                "No SHA-256 checksum is pinned in build.rs for release asset \
+                 `{asset_name}.tar.gz`.\nAdd its digest to `RELEASE_CHECKSUMS`."
+            )
+        });
+
+    let bytes = fs::read(file_path).unwrap_or_else(|e| {
+        panic!(
+            "Failed to read downloaded archive {} for checksum verification: {e}",
+            file_path.display()
+        )
+    });
+
+    let mut actual = String::with_capacity(64);
+    for byte in Sha256::digest(&bytes) {
+        let _ = write!(actual, "{byte:02x}");
+    }
+
+    if !actual.eq_ignore_ascii_case(expected) {
+        // Don't leave the untrusted archive lying around for the extract step.
+        let _ = fs::remove_file(file_path);
+        panic!(
+            "Checksum mismatch for release asset `{asset_name}.tar.gz`.\n\
+             \n\
+             expected SHA-256: {expected}\n\
+             actual SHA-256:   {actual}\n\
+             \n\
+             The downloaded archive does not match the checksum pinned in build.rs. The \
+             release asset may have been tampered with, or `RELEASE_CHECKSUMS` may be stale \
+             for release `{RELEASE_TAG}`. Refusing to link an unverified binary."
+        );
+    }
+}
+
+/// Gets the release archive from which the DXC binary should be downloaded.
+fn get_target_artifact(static_crt: bool) -> ReleaseArtifact {
     let base_url = format!("https://github.com/{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}/releases");
     const AVAILABLE_TARGETS: &[&str] = &[
         "x86_64-linux-gnu",
@@ -220,7 +345,11 @@ fn get_target_url(static_crt: bool) -> String {
     } else {
         "lib"
     };
-    format!("{base_url}/download/{RELEASE_TAG}/{target}_ReleaseFast_{crt}.tar.gz")
+    let asset_name = format!("{target}_ReleaseFast_{crt}");
+    ReleaseArtifact {
+        url: format!("{base_url}/download/{RELEASE_TAG}/{asset_name}.tar.gz"),
+        asset_name,
+    }
 }
 
 /// Downloads the provided URL to a file.

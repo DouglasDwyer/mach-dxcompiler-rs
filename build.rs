@@ -15,75 +15,78 @@ const RELEASE_REPO_NAME: &str = "mach-dxcompiler";
 /// Release tag the prebuilt binaries are downloaded from.
 const RELEASE_TAG: &str = "2024.11.22+284d956.1";
 
-/// A target triple this crate can download a prebuilt archive for, along with the
-/// expected SHA-256 of each of its release archives. Refresh these whenever
-/// [`RELEASE_TAG`] changes; for an immutable release they can be copied from the
-/// `digest` field of the GitHub releases API.
+/// A prebuilt archive this crate can download for one target triple and CRT linkage.
 struct Target {
-    name: &'static str,
-    /// SHA-256 of the statically-linked `..._ReleaseFast_lib.tar.gz` archive.
-    lib_sha256: &'static str,
-    /// SHA-256 of the `..._ReleaseFast_Dynamic_lib.tar.gz` archive, for MSVC targets
-    /// that dynamically link the CRT.
-    dynamic_lib_sha256: Option<&'static str>,
+    pub name: &'static str,
+    /// Whether this archive statically links the CRT. Only MSVC targets publish a
+    /// dynamically-linked build, so every other target has a single `true` entry.
+    pub crt_static: bool,
+    /// SHA-256 of the archive.
+    pub sha256: &'static str,
 }
 
+/// Every archive this crate can download. Refresh these whenever [`RELEASE_TAG`]
+/// changes; for an immutable release the digests can be copied from the `digest`
+/// field of the GitHub releases API.
 const AVAILABLE_TARGETS: &[Target] = &[
     Target {
         name: "x86_64-linux-gnu",
-        lib_sha256: "a1f3afc81b4806a248fa66639820d2f0834493fd487ffa621a2fee2ec7029fdf",
-        dynamic_lib_sha256: None,
+        crt_static: true,
+        sha256: "a1f3afc81b4806a248fa66639820d2f0834493fd487ffa621a2fee2ec7029fdf",
     },
     Target {
         name: "x86_64-linux-musl",
-        lib_sha256: "a7e1e6e0c7834a62345c089bcc8884842688a669ffb5b7c932cf4702e56c54e0",
-        dynamic_lib_sha256: None,
+        crt_static: true,
+        sha256: "a7e1e6e0c7834a62345c089bcc8884842688a669ffb5b7c932cf4702e56c54e0",
     },
     Target {
         name: "aarch64-linux-gnu",
-        lib_sha256: "0f2a60cb362e6e274471c854d997872256d82d3e3cc416403499c875c6936b04",
-        dynamic_lib_sha256: None,
+        crt_static: true,
+        sha256: "0f2a60cb362e6e274471c854d997872256d82d3e3cc416403499c875c6936b04",
     },
     Target {
         name: "aarch64-linux-musl",
-        lib_sha256: "b040850fcab3d886d9cb46fddfa584659fda28b425cab63cd854ce3597f25ebd",
-        dynamic_lib_sha256: None,
+        crt_static: true,
+        sha256: "b040850fcab3d886d9cb46fddfa584659fda28b425cab63cd854ce3597f25ebd",
     },
     Target {
         name: "x86_64-windows-gnu",
-        lib_sha256: "839a30779cfbd69fea6a65f76f2cc0d10e27bac1b4d54a2a18ec8c4c4f106101",
-        dynamic_lib_sha256: None,
+        crt_static: true,
+        sha256: "839a30779cfbd69fea6a65f76f2cc0d10e27bac1b4d54a2a18ec8c4c4f106101",
     },
     Target {
         name: "aarch64-windows-gnu",
-        lib_sha256: "63d9940b6f839cf80ab6196bb75af531fdacc24169df874a7c20e1fce0a46fb9",
-        dynamic_lib_sha256: None,
+        crt_static: true,
+        sha256: "63d9940b6f839cf80ab6196bb75af531fdacc24169df874a7c20e1fce0a46fb9",
     },
     Target {
         name: "x86_64-windows-msvc",
-        lib_sha256: "cc3ae4ede81cc0d9c212420c97d6c98a580acf116acbf1d62caed6f3fd1b1b16",
-        dynamic_lib_sha256: Some(
-            "b5e1a7dd3c2d57e1ac27a357003b39d1c58ecdac3d548aca0ef4127f2833d2e1",
-        ),
+        crt_static: true,
+        sha256: "cc3ae4ede81cc0d9c212420c97d6c98a580acf116acbf1d62caed6f3fd1b1b16",
+    },
+    Target {
+        name: "x86_64-windows-msvc",
+        crt_static: false,
+        sha256: "b5e1a7dd3c2d57e1ac27a357003b39d1c58ecdac3d548aca0ef4127f2833d2e1",
     },
     Target {
         name: "x86_64-macos-none",
-        lib_sha256: "724a75552589e72d08a4dd752b930127b216b5451af5d86cad99a95e4df37240",
-        dynamic_lib_sha256: None,
+        crt_static: true,
+        sha256: "724a75552589e72d08a4dd752b930127b216b5451af5d86cad99a95e4df37240",
     },
     Target {
         name: "aarch64-macos-none",
-        lib_sha256: "9fc8cc0b0bc855d0a67a782145145e90a5ce70a130a2ae87d05eafa151896f91",
-        dynamic_lib_sha256: None,
+        crt_static: true,
+        sha256: "9fc8cc0b0bc855d0a67a782145145e90a5ce70a130a2ae87d05eafa151896f91",
     },
 ];
 
 /// A prebuilt release archive to download and link.
 struct ReleaseArtifact {
     /// URL of the `.tar.gz` archive.
-    url: String,
+    pub url: String,
     /// Expected SHA-256 of the archive.
-    sha256: &'static str,
+    pub sha256: &'static str,
 }
 
 /// Downloads and links the static DXC binary.
@@ -268,28 +271,24 @@ fn get_target_artifact(static_crt: bool) -> ReleaseArtifact {
         abi = "none".to_owned();
     }
     let target_name = format!("{arch}-{os}-{abi}");
+    let crt_static = abi != "msvc" || static_crt;
 
     let target = AVAILABLE_TARGETS
         .iter()
-        .find(|t| t.name == target_name)
+        .find(|t| t.name == target_name && t.crt_static == crt_static)
         .unwrap_or_else(|| {
             panic!("Unsupported target: {target_name}\nCheck supported targets on {base_url}")
         });
 
-    let (crt, sha256) = if abi == "msvc" && !static_crt {
-        (
-            "Dynamic_lib",
-            target.dynamic_lib_sha256.unwrap_or_else(|| {
-                panic!("No dynamically-linked CRT build is available for target {target_name}")
-            }),
-        )
+    let crt = if target.crt_static {
+        "lib"
     } else {
-        ("lib", target.lib_sha256)
+        "Dynamic_lib"
     };
 
     ReleaseArtifact {
         url: format!("{base_url}/download/{RELEASE_TAG}/{target_name}_ReleaseFast_{crt}.tar.gz"),
-        sha256,
+        sha256: target.sha256,
     }
 }
 

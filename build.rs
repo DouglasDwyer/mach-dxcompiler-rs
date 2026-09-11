@@ -90,8 +90,6 @@ struct ReleaseArtifact {
 fn main() {
     println!("cargo:rerun-if-changed=msvc_version.c");
     println!("cargo:rerun-if-changed=mach_dxc.h");
-    println!("cargo:rerun-if-env-changed=GITHUB_TOKEN");
-    println!("cargo:rerun-if-env-changed=GH_TOKEN");
     #[cfg(all(feature = "msvc_version_validation", target_env = "msvc"))]
     validate_msvc_version();
     verify_release_is_immutable();
@@ -179,31 +177,9 @@ fn verify_release_is_immutable() {
         "https://api.github.com/repos/{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}/releases/tags/{RELEASE_TAG}"
     );
 
-    let mut command = Command::new("curl");
-    command
+    let output = Command::new("curl")
         .arg("--location")
-        .arg("--fail")
-        .arg("--silent")
-        .arg("--show-error")
-        .arg("--header")
-        .arg("Accept: application/vnd.github+json")
-        .arg("--header")
-        .arg("X-GitHub-Api-Version: 2022-11-28")
-        .arg("--user-agent")
-        .arg("mach-dxcompiler-rs-build-script")
-        .arg(&api_url);
-
-    if let Some(token) = env::var("GITHUB_TOKEN")
-        .or_else(|_| env::var("GH_TOKEN"))
-        .ok()
-        .filter(|token| !token.is_empty())
-    {
-        command
-            .arg("--header")
-            .arg(format!("Authorization: Bearer {token}"));
-    }
-
-    let output = command
+        .arg(&api_url)
         .output()
         .expect("Failed to start Curl to query the GitHub releases API");
     if !output.status.success() {

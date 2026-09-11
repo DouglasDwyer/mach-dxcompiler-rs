@@ -21,7 +21,25 @@ fn main() {
     extract_tar_gz(&file_path, &out_dir);
     #[cfg(feature = "cbindings")]
     generate_bindings();
-    println!("cargo:rustc-link-lib=static=machdxcompiler");
+    link_machdxcompiler(&out_dir);
+}
+
+/// Emits the `cargo:rustc-link-*` directives needed to statically link `machdxcompiler`.
+fn link_machdxcompiler(out_dir: &Path) {
+    let os = env::var("CARGO_CFG_TARGET_OS").expect("Failed to get os");
+    let abi = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+
+    if os == "windows" && abi == "gnu" {
+        // The Zig compiler suffixes Windows/GNU libraries with `.lib`, but Rust expects `.a`
+        println!("cargo:rustc-link-lib=static:+verbatim=machdxcompiler.lib");
+        println!("cargo:rustc-link-lib=dylib=c++");
+        println!("cargo:rustc-link-lib=dylib=ole32");
+        println!("cargo:rustc-link-lib=dylib=oleaut32");
+        println!("cargo:rustc-link-lib=dylib=version");
+    } else {
+        println!("cargo:rustc-link-lib=static=machdxcompiler");
+    }
+
     println!("cargo:rustc-link-search=native={}", out_dir.display());
 }
 

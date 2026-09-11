@@ -1,5 +1,8 @@
 //! The list of prebuilt `mach-dxcompiler` archives that [`build.rs`](../build.rs) can
 //! download, along with their checksums.
+//!
+//! Regenerate this file with `cargo build --features update_targets` rather than
+//! editing it by hand.
 
 /// A prebuilt archive this crate can download for one target triple and CRT linkage.
 pub struct Target {
@@ -12,58 +15,59 @@ pub struct Target {
     pub sha256: &'static str,
 }
 
-/// Every archive this crate can download, for the release named by `RELEASE_TAG` in
-/// `build.rs`. Refresh these whenever that tag changes; for an immutable release the
-/// digests can be copied from the `digest` field of the GitHub releases API.
+/// Release tag the prebuilt binaries are downloaded from.
+pub const RELEASE_TAG: &str = "2026.09.11+087be1c.1";
+
+/// Every archive this crate can download, for [`RELEASE_TAG`].
 pub const AVAILABLE_TARGETS: &[Target] = &[
     Target {
-        name: "x86_64-linux-gnu",
-        static_crt: false,
-        sha256: "a1f3afc81b4806a248fa66639820d2f0834493fd487ffa621a2fee2ec7029fdf",
-    },
-    Target {
-        name: "x86_64-linux-musl",
-        static_crt: true,
-        sha256: "a7e1e6e0c7834a62345c089bcc8884842688a669ffb5b7c932cf4702e56c54e0",
-    },
-    Target {
         name: "aarch64-linux-gnu",
-        static_crt: false,
-        sha256: "0f2a60cb362e6e274471c854d997872256d82d3e3cc416403499c875c6936b04",
+        static_crt: true,
+        sha256: "73db50a1315f51458cd80015e49147a424637f95a11c0ff1820c9999e8ff2fbd",
     },
     Target {
         name: "aarch64-linux-musl",
         static_crt: true,
-        sha256: "b040850fcab3d886d9cb46fddfa584659fda28b425cab63cd854ce3597f25ebd",
+        sha256: "689d95a60c4cb17d64bb75b34faa65712fad20523d9e82ca3aa35cc25c5b5555",
     },
     Target {
-        name: "x86_64-windows-gnu",
-        static_crt: false,
-        sha256: "839a30779cfbd69fea6a65f76f2cc0d10e27bac1b4d54a2a18ec8c4c4f106101",
+        name: "aarch64-macos-none",
+        static_crt: true,
+        sha256: "03cd4665c693267a85924f1ffd9f85629dc5668f5f39dc7bbc725595a0615adc",
     },
     Target {
         name: "aarch64-windows-gnu",
-        static_crt: false,
-        sha256: "63d9940b6f839cf80ab6196bb75af531fdacc24169df874a7c20e1fce0a46fb9",
+        static_crt: true,
+        sha256: "1f3adf09facf1dc5db0db55919e69953def1c2e2effc257620b0b7ee584035a8",
+    },
+    Target {
+        name: "x86_64-linux-gnu",
+        static_crt: true,
+        sha256: "863c29363e016f413d2df66c786063cb4fe04905e474dfdd6a86c68fe3bfa982",
+    },
+    Target {
+        name: "x86_64-linux-musl",
+        static_crt: true,
+        sha256: "b0127fcfb0023489f6d1bff38135780da995a54b06e3afb1a4be5d1b34cec965",
+    },
+    Target {
+        name: "x86_64-macos-none",
+        static_crt: true,
+        sha256: "cbb9585bc9cfa8ef746bcd496d769bb36cb6e0d5291200affd71edc23f0d6881",
+    },
+    Target {
+        name: "x86_64-windows-gnu",
+        static_crt: true,
+        sha256: "86399396eb7538aa74c980b4c045e288729ea74f72662629adde0e605a676419",
     },
     Target {
         name: "x86_64-windows-msvc",
         static_crt: true,
-        sha256: "cc3ae4ede81cc0d9c212420c97d6c98a580acf116acbf1d62caed6f3fd1b1b16",
+        sha256: "f5322f221b5c19c36d2ce6af7bf44bb236969b2284254807262ef07b80a81d4b",
     },
     Target {
         name: "x86_64-windows-msvc",
         static_crt: false,
-        sha256: "b5e1a7dd3c2d57e1ac27a357003b39d1c58ecdac3d548aca0ef4127f2833d2e1",
-    },
-    Target {
-        name: "x86_64-macos-none",
-        static_crt: false,
-        sha256: "724a75552589e72d08a4dd752b930127b216b5451af5d86cad99a95e4df37240",
-    },
-    Target {
-        name: "aarch64-macos-none",
-        static_crt: false,
-        sha256: "9fc8cc0b0bc855d0a67a782145145e90a5ce70a130a2ae87d05eafa151896f91",
+        sha256: "3c0d35d55fe3e7b3b288b80b0fd1bcd416598da422ac34ea44194bac7842a513",
     },
 ];

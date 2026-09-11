@@ -1,24 +1,26 @@
 //! Downloads and statically links the `mach-dxcompiler` C library.
 
+#[cfg(not(feature = "update_targets"))]
 mod targets;
 
-use std::env;
+use std::fs;
 use std::process::Command;
+#[cfg(not(feature = "update_targets"))]
 use std::{
-    fs,
+    env,
     io::ErrorKind::NotFound,
     path::{Path, PathBuf},
 };
-use targets::AVAILABLE_TARGETS;
+#[cfg(not(feature = "update_targets"))]
+use targets::{AVAILABLE_TARGETS, RELEASE_TAG};
 
 /// Owner of the GitHub repository hosting the prebuilt `mach-dxcompiler` releases.
 const RELEASE_REPO_OWNER: &str = "DouglasDwyer";
 /// Name of the GitHub repository hosting the prebuilt `mach-dxcompiler` releases.
 const RELEASE_REPO_NAME: &str = "mach-dxcompiler";
-/// Release tag the prebuilt binaries are downloaded from.
-const RELEASE_TAG: &str = "2024.11.22+284d956.1";
 
 /// A prebuilt release archive to download and link.
+#[cfg(not(feature = "update_targets"))]
 struct ReleaseArtifact {
     /// URL of the `.tar.gz` archive.
     pub url: String,
@@ -27,6 +29,7 @@ struct ReleaseArtifact {
 }
 
 /// Downloads and links the static DXC binary.
+#[cfg(not(feature = "update_targets"))]
 fn main() {
     println!("cargo:rerun-if-changed=msvc_version.c");
     println!("cargo:rerun-if-changed=mach_dxc.h");
@@ -46,8 +49,15 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", out_dir.display());
 }
 
+/// Regenerates `targets.rs` instead of building, since the two are mutually exclusive:
+/// there's no library to link until `targets.rs` reflects a real, immutable release.
+#[cfg(feature = "update_targets")]
+fn main() {
+    update_targets();
+}
+
 /// Generates C API bindings.
-#[cfg(feature = "cbindings")]
+#[cfg(all(feature = "cbindings", not(feature = "update_targets")))]
 fn generate_bindings() {
     let bindings = bindgen::Builder::default()
         .rust_target(bindgen::RustTarget::Stable_1_73)
@@ -71,7 +81,11 @@ fn generate_bindings() {
 /// is compatible with the features introduced in Visual Studio 2022 version 17.11.
 /// It retrieves the compiler version using the `cl.exe` executable and compares it against
 /// a predefined minimum version. Panics if the current version is lower than the required minimum version.
-#[cfg(all(feature = "msvc_version_validation", target_env = "msvc"))]
+#[cfg(all(
+    feature = "msvc_version_validation",
+    target_env = "msvc",
+    not(feature = "update_targets")
+))]
 fn validate_msvc_version() {
     let target = std::env::var("TARGET").expect("Faild to get TARGET environment");
 
@@ -108,14 +122,11 @@ fn validate_msvc_version() {
     }
 }
 
-/// Verifies that [`RELEASE_TAG`] is an [immutable release], so its assets cannot be
-/// swapped out after publication. Panics if the release is not immutable or its status
-/// cannot be determined via the GitHub REST API.
-///
-/// [immutable release]: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases
-fn verify_release_is_immutable() {
+/// Fetches the JSON body of `GET /repos/{owner}/{repo}/releases/{path}` from the
+/// GitHub REST API. Panics if the request fails or the response isn't valid UTF-8.
+fn fetch_release_json(path: &str) -> String {
     let api_url = format!(
-        "https://api.github.com/repos/{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}/releases/tags/{RELEASE_TAG}"
+        "https://api.github.com/repos/{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}/releases/{path}"
     );
 
     let output = Command::new("curl")
@@ -125,14 +136,22 @@ fn verify_release_is_immutable() {
         .expect("Failed to start Curl to query the GitHub releases API");
     if !output.status.success() {
         panic!(
-            "Failed to query the GitHub releases API at {api_url} to verify that the \
-             release is immutable:\n{}",
+            "Failed to query the GitHub releases API at {api_url}:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
 
-    let body = String::from_utf8(output.stdout)
-        .expect("GitHub releases API returned a non-UTF-8 response");
+    String::from_utf8(output.stdout).expect("GitHub releases API returned a non-UTF-8 response")
+}
+
+/// Verifies that [`RELEASE_TAG`] is an [immutable release], so its assets cannot be
+/// swapped out after publication. Panics if the release is not immutable or its status
+/// cannot be determined via the GitHub REST API.
+///
+/// [immutable release]: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases
+#[cfg(not(feature = "update_targets"))]
+fn verify_release_is_immutable() {
+    let body = fetch_release_json(&format!("tags/{RELEASE_TAG}"));
 
     if !release_json_is_immutable(&body) {
         panic!(
@@ -145,21 +164,179 @@ fn verify_release_is_immutable() {
     }
 }
 
-/// Returns `true` if the release API JSON reports `"immutable": true`, scanning the
-/// flat payload directly to avoid a JSON-parser build dependency.
+/// Returns `true` if the release API JSON reports `"immutable": true`.
 fn release_json_is_immutable(body: &str) -> bool {
-    let Some((_, after_key)) = body.split_once("\"immutable\"") else {
-        return false;
-    };
-    let Some(after_colon) = after_key.trim_start().strip_prefix(':') else {
-        return false;
-    };
-    after_colon.trim_start().starts_with("true")
+    json_bool_field(body, "immutable").unwrap_or(false)
+}
+
+/// Reads a top-level `"key": <bool>` field out of a JSON object, scanning the payload
+/// directly to avoid a JSON-parser build dependency.
+fn json_bool_field(json: &str, key: &str) -> Option<bool> {
+    let (_, after_key) = json.split_once(&format!("\"{key}\""))?;
+    let after_colon = after_key.trim_start().strip_prefix(':')?.trim_start();
+    Some(after_colon.starts_with("true"))
+}
+
+/// Regenerates `targets.rs` from the latest GitHub release and stops the build.
+///
+/// Fetches the repository's latest release, verifies it is immutable, reads each
+/// `*_ReleaseFast_{lib,Dynamic_lib}.tar.gz` asset's SHA-256 straight from the
+/// GitHub-computed `digest` field, and rewrites `targets.rs` to match. Never returns:
+/// it panics either way, since there's nothing valid left to link.
+#[cfg(feature = "update_targets")]
+fn update_targets() -> ! {
+    let body = fetch_release_json("latest");
+
+    if !release_json_is_immutable(&body) {
+        panic!(
+            "Refusing to pin a mutable GitHub release.\n\n\
+             The latest release of `{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}` is not an \
+             immutable release, so its assets could be replaced after publication. Wait for an \
+             immutable release before regenerating targets.rs.\n\
+             https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases"
+        );
+    }
+
+    let tag = json_string_field(&body, "tag_name").expect("Release JSON had no `tag_name` field");
+    let assets_body =
+        json_array_field(&body, "assets").expect("Release JSON had no `assets` array");
+
+    let mut targets: Vec<(&str, bool, &str)> = json_objects(assets_body)
+        .into_iter()
+        .filter_map(|asset| {
+            let name = json_string_field(asset, "name")?;
+            let (target_name, crt) = name.strip_suffix(".tar.gz")?.split_once("_ReleaseFast_")?;
+            let static_crt = match crt {
+                "lib" => true,
+                "Dynamic_lib" => false,
+                _ => return None,
+            };
+            let digest = json_string_field(asset, "digest")
+                .unwrap_or_else(|| panic!("Asset `{name}` has no digest"));
+            let sha256 = digest
+                .strip_prefix("sha256:")
+                .unwrap_or_else(|| panic!("Asset `{name}` has a non-SHA-256 digest: {digest}"));
+            Some((target_name, static_crt, sha256))
+        })
+        .collect();
+    targets.sort_by(|a, b| a.0.cmp(b.0).then(b.1.cmp(&a.1)));
+
+    fs::write("targets.rs", render_targets_file(tag, &targets))
+        .expect("Failed to write targets.rs");
+    let _ = Command::new("rustfmt").arg("targets.rs").status();
+
+    panic!(
+        "Updated targets.rs for release `{tag}` with {} target(s). This always \"fails\" the \
+         build; re-run `cargo build` without `--features update_targets` to build normally.",
+        targets.len()
+    );
+}
+
+/// Renders the contents of `targets.rs` for the given release tag and target list.
+/// Formatting doesn't matter here: [`update_targets`] runs `rustfmt` on the result.
+#[cfg(feature = "update_targets")]
+fn render_targets_file(tag: &str, targets: &[(&str, bool, &str)]) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::from(
+        "//! The list of prebuilt `mach-dxcompiler` archives that [`build.rs`](../build.rs) can\n\
+         //! download, along with their checksums.\n\
+         //!\n\
+         //! Regenerate this file with `cargo build --features update_targets` rather than\n\
+         //! editing it by hand.\n\n\
+         /// A prebuilt archive this crate can download for one target triple and CRT linkage.\n\
+         pub struct Target {\n\
+         pub name: &'static str,\n\
+         /// Whether this archive links the CRT statically. Only targets that publish more\n\
+         /// than one archive (currently just MSVC) select between builds using this;\n\
+         /// every other target's sole entry is used regardless of its value.\n\
+         pub static_crt: bool,\n\
+         /// SHA-256 of the archive.\n\
+         pub sha256: &'static str,\n\
+         }\n\n\
+         /// Release tag the prebuilt binaries are downloaded from.\n",
+    );
+    let _ = writeln!(out, "pub const RELEASE_TAG: &str = \"{tag}\";\n");
+    out.push_str(
+        "/// Every archive this crate can download, for [`RELEASE_TAG`].\n\
+         pub const AVAILABLE_TARGETS: &[Target] = &[\n",
+    );
+    for (name, static_crt, sha256) in targets {
+        let _ = writeln!(
+            out,
+            "Target {{ name: \"{name}\", static_crt: {static_crt}, sha256: \"{sha256}\" }},"
+        );
+    }
+    out.push_str("];\n");
+    out
+}
+
+/// Reads a top-level `"key": "<string>"` field out of a JSON object.
+#[cfg(feature = "update_targets")]
+fn json_string_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let (_, after_key) = json.split_once(&format!("\"{key}\""))?;
+    let after_colon = after_key.trim_start().strip_prefix(':')?.trim_start();
+    let rest = after_colon.strip_prefix('"')?;
+    Some(&rest[..rest.find('"')?])
+}
+
+/// Reads a top-level `"key": [...]` field out of a JSON object, returning the raw text
+/// between the array's brackets.
+#[cfg(feature = "update_targets")]
+fn json_array_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let (_, after_key) = json.split_once(&format!("\"{key}\""))?;
+    let after_colon = after_key.trim_start().strip_prefix(':')?.trim_start();
+    let body = after_colon.strip_prefix('[')?;
+    Some(&body[..find_closing_bracket(body)?])
+}
+
+/// Splits the body of a JSON array into the raw text of each top-level `{...}` object.
+#[cfg(feature = "update_targets")]
+fn json_objects(array_body: &str) -> Vec<&str> {
+    let mut objects = Vec::new();
+    let mut rest = array_body;
+    while let Some(start) = rest.find('{') {
+        let body = &rest[start + 1..];
+        let Some(end) = find_closing_bracket(body) else {
+            break;
+        };
+        objects.push(&body[..end]);
+        rest = &body[end + 1..];
+    }
+    objects
+}
+
+/// Given the text just after an opening `{` or `[`, returns the index of the matching
+/// closing bracket, correctly skipping over nested brackets and quoted strings.
+#[cfg(feature = "update_targets")]
+fn find_closing_bracket(s: &str) -> Option<usize> {
+    let mut depth = 0u32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in s.char_indices() {
+        if in_string {
+            match c {
+                '\\' if !escaped => escaped = true,
+                '"' if !escaped => in_string = false,
+                _ => escaped = false,
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '[' | '{' => depth += 1,
+            ']' | '}' if depth == 0 => return Some(i),
+            ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Verifies that the downloaded archive's SHA-256 matches `expected`, pinning the
 /// exact native-binary bytes that get linked. Panics if the archive cannot be read
 /// or its digest does not match.
+#[cfg(not(feature = "update_targets"))]
 fn verify_checksum(file_path: &Path, expected: &str) {
     let bytes = fs::read(file_path).unwrap_or_else(|e| {
         panic!(
@@ -186,6 +363,7 @@ fn verify_checksum(file_path: &Path, expected: &str) {
 }
 
 /// Computes the SHA-256 digest of `data`, returned as lowercase hex.
+#[cfg(not(feature = "update_targets"))]
 fn sha256_hex(data: &[u8]) -> String {
     use std::fmt::Write;
 
@@ -200,6 +378,7 @@ fn sha256_hex(data: &[u8]) -> String {
 /// target whose CRT linkage matches `static_crt`, falling back to whatever's published
 /// for that name; only targets with more than one published archive (currently just
 /// MSVC) name a dynamically-linked build differently.
+#[cfg(not(feature = "update_targets"))]
 fn get_target_artifact(static_crt: bool) -> ReleaseArtifact {
     let base_url = format!("https://github.com/{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}/releases");
     let arch = env::var("CARGO_CFG_TARGET_ARCH").expect("Failed to get architecture");
@@ -238,6 +417,7 @@ fn get_target_artifact(static_crt: bool) -> ReleaseArtifact {
 }
 
 /// Downloads the provided URL to a file.
+#[cfg(not(feature = "update_targets"))]
 fn download_released_library(url: &str, file_path: &Path) {
     match Command::new("curl")
         .arg("--location")
@@ -271,6 +451,7 @@ fn download_released_library(url: &str, file_path: &Path) {
 
 /// Extracts the file at the provided path as a `.tar.gz` file.
 /// The contents are extracted to the current directory.
+#[cfg(not(feature = "update_targets"))]
 fn extract_tar_gz(path: &Path, output_dir: &Path) {
     let result = Command::new("tar")
         .current_dir(output_dir)
@@ -286,6 +467,7 @@ fn extract_tar_gz(path: &Path, output_dir: &Path) {
 }
 
 /// Determines whether the CRT is being statically or dynamically linked.
+#[cfg(not(feature = "update_targets"))]
 fn static_crt() -> bool {
     env::var("CARGO_ENCODED_RUSTFLAGS")
         .map(|flags| flags.contains("target-feature=+crt-static"))

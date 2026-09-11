@@ -1,0 +1,163 @@
+//! The `Target` schema for `targets.rs`, plus the `update_targets` feature's tool for
+//! regenerating that file from the latest GitHub release. The schema is always
+//! compiled, since `targets.rs` needs it in every build; the regeneration tool is
+//! gated behind the `update_targets` feature.
+
+/// A prebuilt archive this crate can download for one target triple and CRT linkage.
+// Only constructed by `targets.rs`, which isn't compiled under `update_targets`.
+#[cfg_attr(feature = "update_targets", allow(dead_code))]
+pub struct Target {
+    /// Target triple, e.g. `"x86_64-linux-gnu"`.
+    pub name: &'static str,
+    /// Whether this archive links the CRT statically. Only targets that publish more
+    /// than one archive (currently just MSVC) select between builds using this;
+    /// every other target's sole entry is used regardless of its value.
+    pub static_crt: bool,
+    /// SHA-256 of the archive.
+    pub sha256: &'static str,
+}
+
+/// Regenerates `targets.rs` from the latest GitHub release and stops the build.
+///
+/// Fetches the repository's latest release, verifies it is immutable, reads each
+/// `*_ReleaseFast_{lib,Dynamic_lib}.tar.gz` asset's SHA-256 straight from the
+/// GitHub-computed `digest` field, and rewrites `targets.rs` to match. Never returns:
+/// it panics either way, since there's nothing valid left to link.
+#[cfg(feature = "update_targets")]
+pub fn run() -> ! {
+    let body = super::fetch_release_json("latest");
+
+    if !super::release_json_is_immutable(&body) {
+        panic!(
+            "Refusing to pin a mutable GitHub release.\n\n\
+             The latest release of `{}/{}` is not an immutable release, so its assets \
+             could be replaced after publication. Wait for an immutable release before \
+             regenerating targets.rs.\n\
+             https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases",
+            super::RELEASE_REPO_OWNER,
+            super::RELEASE_REPO_NAME
+        );
+    }
+
+    let tag = json_string_field(&body, "tag_name").expect("Release JSON had no `tag_name` field");
+    let assets_body =
+        json_array_field(&body, "assets").expect("Release JSON had no `assets` array");
+
+    let mut targets: Vec<(&str, bool, &str)> = json_objects(assets_body)
+        .into_iter()
+        .filter_map(|asset| {
+            let name = json_string_field(asset, "name")?;
+            let (target_name, crt) = name.strip_suffix(".tar.gz")?.split_once("_ReleaseFast_")?;
+            let static_crt = match crt {
+                "lib" => true,
+                "Dynamic_lib" => false,
+                _ => return None,
+            };
+            let digest = json_string_field(asset, "digest")
+                .unwrap_or_else(|| panic!("Asset `{name}` has no digest"));
+            let sha256 = digest
+                .strip_prefix("sha256:")
+                .unwrap_or_else(|| panic!("Asset `{name}` has a non-SHA-256 digest: {digest}"));
+            Some((target_name, static_crt, sha256))
+        })
+        .collect();
+    targets.sort_by_key(|&(name, static_crt, _)| (name, std::cmp::Reverse(static_crt)));
+
+    std::fs::write("targets.rs", render_targets_file(tag, &targets))
+        .expect("Failed to write targets.rs");
+    let _ = std::process::Command::new("rustfmt")
+        .arg("targets.rs")
+        .status();
+
+    panic!(
+        "Updated targets.rs for release `{tag}` with {} target(s). This always \"fails\" the \
+         build; re-run `cargo build` without `--features update_targets` to build normally.",
+        targets.len()
+    );
+}
+
+/// Renders the contents of `targets.rs` for the given release tag and target list.
+/// Formatting doesn't matter here: [`run`] runs `rustfmt` on the result.
+#[cfg(feature = "update_targets")]
+fn render_targets_file(tag: &str, targets: &[(&str, bool, &str)]) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::from(
+        "//! Generated release data; see [`crate::update_targets`] for the `Target` type\n\
+         //! and the generator. Regenerate with `cargo build --features update_targets`\n\
+         //! rather than editing this by hand.\n\n\
+         use crate::update_targets::Target;\n\n\
+         /// Release tag the prebuilt binaries are downloaded from.\n",
+    );
+    let _ = writeln!(out, "pub const RELEASE_TAG: &str = \"{tag}\";\n");
+    out.push_str(
+        "/// Every archive this crate can download, for [`RELEASE_TAG`].\n\
+         pub const AVAILABLE_TARGETS: &[Target] = &[\n",
+    );
+    for (name, static_crt, sha256) in targets {
+        let _ = writeln!(
+            out,
+            "Target {{ name: \"{name}\", static_crt: {static_crt}, sha256: \"{sha256}\" }},"
+        );
+    }
+    out.push_str("];\n");
+    out
+}
+
+/// Reads a top-level `"key": "<string>"` field out of a JSON object.
+#[cfg(feature = "update_targets")]
+fn json_string_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let rest = super::json_field(json, key)?.strip_prefix('"')?;
+    Some(&rest[..rest.find('"')?])
+}
+
+/// Reads a top-level `"key": [...]` field out of a JSON object, returning the raw text
+/// between the array's brackets.
+#[cfg(feature = "update_targets")]
+fn json_array_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let body = super::json_field(json, key)?.strip_prefix('[')?;
+    Some(&body[..find_closing_bracket(body)?])
+}
+
+/// Splits the body of a JSON array into the raw text of each top-level `{...}` object.
+#[cfg(feature = "update_targets")]
+fn json_objects(array_body: &str) -> Vec<&str> {
+    let mut objects = Vec::new();
+    let mut rest = array_body;
+    while let Some(start) = rest.find('{') {
+        let body = &rest[start + 1..];
+        let Some(end) = find_closing_bracket(body) else {
+            break;
+        };
+        objects.push(&body[..end]);
+        rest = &body[end + 1..];
+    }
+    objects
+}
+
+/// Given the text just after an opening `{` or `[`, returns the index of the matching
+/// closing bracket, correctly skipping over nested brackets and quoted strings.
+#[cfg(feature = "update_targets")]
+fn find_closing_bracket(s: &str) -> Option<usize> {
+    let mut depth = 0u32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in s.char_indices() {
+        if in_string {
+            match c {
+                '\\' if !escaped => escaped = true,
+                '"' if !escaped => in_string = false,
+                _ => escaped = false,
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '[' | '{' => depth += 1,
+            ']' | '}' if depth == 0 => return Some(i),
+            ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}

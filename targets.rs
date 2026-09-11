@@ -1,20 +1,8 @@
-//! The list of prebuilt `mach-dxcompiler` archives that [`build.rs`](../build.rs) can
-//! download, along with their checksums.
-//!
-//! Regenerate this file with `cargo build --features update_targets` rather than
-//! editing it by hand.
+//! Generated release data; see [`crate::update_targets`] for the `Target` type
+//! and the generator. Regenerate with `cargo build --features update_targets`
+//! rather than editing this by hand.
 
-/// A prebuilt archive this crate can download for one target triple and CRT linkage.
-pub struct Target {
-    /// Target triple, e.g. `"x86_64-linux-gnu"`.
-    pub name: &'static str,
-    /// Whether this archive links the CRT statically. Only targets that publish more
-    /// than one archive (currently just MSVC) select between builds using this;
-    /// every other target's sole entry is used regardless of its value.
-    pub static_crt: bool,
-    /// SHA-256 of the archive.
-    pub sha256: &'static str,
-}
+use crate::update_targets::Target;
 
 /// Release tag the prebuilt binaries are downloaded from.
 pub const RELEASE_TAG: &str = "2026.09.11+087be1c.1";

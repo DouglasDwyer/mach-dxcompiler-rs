@@ -1,14 +1,15 @@
 //! Downloads and statically links the `mach-dxcompiler` C library.
 
-/// The list of prebuilt targets this crate can download and their checksums.
+/// Generated release data: the current release tag and its per-target checksums.
 #[cfg(not(feature = "update_targets"))]
 mod targets;
+/// The `Target` schema, plus the `update_targets` feature's regeneration tool.
+mod update_targets;
 
-use std::fs;
 use std::process::Command;
 #[cfg(not(feature = "update_targets"))]
 use std::{
-    env,
+    env, fs,
     io::ErrorKind::NotFound,
     path::{Path, PathBuf},
 };
@@ -54,7 +55,7 @@ fn main() {
 /// there's no library to link until `targets.rs` reflects a real, immutable release.
 #[cfg(feature = "update_targets")]
 fn main() {
-    update_targets();
+    update_targets::run();
 }
 
 /// Generates C API bindings.
@@ -171,159 +172,6 @@ fn release_json_is_immutable(body: &str) -> bool {
 fn json_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     let (_, after_key) = json.split_once(&format!("\"{key}\""))?;
     Some(after_key.trim_start().strip_prefix(':')?.trim_start())
-}
-
-/// Regenerates `targets.rs` from the latest GitHub release and stops the build.
-///
-/// Fetches the repository's latest release, verifies it is immutable, reads each
-/// `*_ReleaseFast_{lib,Dynamic_lib}.tar.gz` asset's SHA-256 straight from the
-/// GitHub-computed `digest` field, and rewrites `targets.rs` to match. Never returns:
-/// it panics either way, since there's nothing valid left to link.
-#[cfg(feature = "update_targets")]
-fn update_targets() -> ! {
-    let body = fetch_release_json("latest");
-
-    if !release_json_is_immutable(&body) {
-        panic!(
-            "Refusing to pin a mutable GitHub release.\n\n\
-             The latest release of `{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}` is not an \
-             immutable release, so its assets could be replaced after publication. Wait for an \
-             immutable release before regenerating targets.rs.\n\
-             https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases"
-        );
-    }
-
-    let tag = json_string_field(&body, "tag_name").expect("Release JSON had no `tag_name` field");
-    let assets_body =
-        json_array_field(&body, "assets").expect("Release JSON had no `assets` array");
-
-    let mut targets: Vec<(&str, bool, &str)> = json_objects(assets_body)
-        .into_iter()
-        .filter_map(|asset| {
-            let name = json_string_field(asset, "name")?;
-            let (target_name, crt) = name.strip_suffix(".tar.gz")?.split_once("_ReleaseFast_")?;
-            let static_crt = match crt {
-                "lib" => true,
-                "Dynamic_lib" => false,
-                _ => return None,
-            };
-            let digest = json_string_field(asset, "digest")
-                .unwrap_or_else(|| panic!("Asset `{name}` has no digest"));
-            let sha256 = digest
-                .strip_prefix("sha256:")
-                .unwrap_or_else(|| panic!("Asset `{name}` has a non-SHA-256 digest: {digest}"));
-            Some((target_name, static_crt, sha256))
-        })
-        .collect();
-    targets.sort_by_key(|&(name, static_crt, _)| (name, std::cmp::Reverse(static_crt)));
-
-    fs::write("targets.rs", render_targets_file(tag, &targets))
-        .expect("Failed to write targets.rs");
-    let _ = Command::new("rustfmt").arg("targets.rs").status();
-
-    panic!(
-        "Updated targets.rs for release `{tag}` with {} target(s). This always \"fails\" the \
-         build; re-run `cargo build` without `--features update_targets` to build normally.",
-        targets.len()
-    );
-}
-
-/// Renders the contents of `targets.rs` for the given release tag and target list.
-/// Formatting doesn't matter here: [`update_targets`] runs `rustfmt` on the result.
-#[cfg(feature = "update_targets")]
-fn render_targets_file(tag: &str, targets: &[(&str, bool, &str)]) -> String {
-    use std::fmt::Write;
-
-    let mut out = String::from(
-        "//! The list of prebuilt `mach-dxcompiler` archives that [`build.rs`](../build.rs) can\n\
-         //! download, along with their checksums.\n\
-         //!\n\
-         //! Regenerate this file with `cargo build --features update_targets` rather than\n\
-         //! editing it by hand.\n\n\
-         /// A prebuilt archive this crate can download for one target triple and CRT linkage.\n\
-         pub struct Target {\n\
-         /// Target triple, e.g. `\"x86_64-linux-gnu\"`.\n\
-         pub name: &'static str,\n\
-         /// Whether this archive links the CRT statically. Only targets that publish more\n\
-         /// than one archive (currently just MSVC) select between builds using this;\n\
-         /// every other target's sole entry is used regardless of its value.\n\
-         pub static_crt: bool,\n\
-         /// SHA-256 of the archive.\n\
-         pub sha256: &'static str,\n\
-         }\n\n\
-         /// Release tag the prebuilt binaries are downloaded from.\n",
-    );
-    let _ = writeln!(out, "pub const RELEASE_TAG: &str = \"{tag}\";\n");
-    out.push_str(
-        "/// Every archive this crate can download, for [`RELEASE_TAG`].\n\
-         pub const AVAILABLE_TARGETS: &[Target] = &[\n",
-    );
-    for (name, static_crt, sha256) in targets {
-        let _ = writeln!(
-            out,
-            "Target {{ name: \"{name}\", static_crt: {static_crt}, sha256: \"{sha256}\" }},"
-        );
-    }
-    out.push_str("];\n");
-    out
-}
-
-/// Reads a top-level `"key": "<string>"` field out of a JSON object.
-#[cfg(feature = "update_targets")]
-fn json_string_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let rest = json_field(json, key)?.strip_prefix('"')?;
-    Some(&rest[..rest.find('"')?])
-}
-
-/// Reads a top-level `"key": [...]` field out of a JSON object, returning the raw text
-/// between the array's brackets.
-#[cfg(feature = "update_targets")]
-fn json_array_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let body = json_field(json, key)?.strip_prefix('[')?;
-    Some(&body[..find_closing_bracket(body)?])
-}
-
-/// Splits the body of a JSON array into the raw text of each top-level `{...}` object.
-#[cfg(feature = "update_targets")]
-fn json_objects(array_body: &str) -> Vec<&str> {
-    let mut objects = Vec::new();
-    let mut rest = array_body;
-    while let Some(start) = rest.find('{') {
-        let body = &rest[start + 1..];
-        let Some(end) = find_closing_bracket(body) else {
-            break;
-        };
-        objects.push(&body[..end]);
-        rest = &body[end + 1..];
-    }
-    objects
-}
-
-/// Given the text just after an opening `{` or `[`, returns the index of the matching
-/// closing bracket, correctly skipping over nested brackets and quoted strings.
-#[cfg(feature = "update_targets")]
-fn find_closing_bracket(s: &str) -> Option<usize> {
-    let mut depth = 0u32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, c) in s.char_indices() {
-        if in_string {
-            match c {
-                '\\' if !escaped => escaped = true,
-                '"' if !escaped => in_string = false,
-                _ => escaped = false,
-            }
-            continue;
-        }
-        match c {
-            '"' => in_string = true,
-            '[' | '{' => depth += 1,
-            ']' | '}' if depth == 0 => return Some(i),
-            ']' | '}' => depth -= 1,
-            _ => {}
-        }
-    }
-    None
 }
 
 /// Verifies that the downloaded archive's SHA-256 matches `expected`, pinning the

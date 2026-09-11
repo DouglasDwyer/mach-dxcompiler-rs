@@ -1,5 +1,6 @@
 //! Downloads and statically links the `mach-dxcompiler` C library.
 
+/// The list of prebuilt targets this crate can download and their checksums.
 #[cfg(not(feature = "update_targets"))]
 mod targets;
 
@@ -61,15 +62,10 @@ fn main() {
 fn generate_bindings() {
     let bindings = bindgen::Builder::default()
         .rust_target(bindgen::RustTarget::Stable_1_73)
-        // The input header we would like to generate
-        // bindings for.
         .header("mach_dxc.h")
-        // Finish the builder and generate the bindings.
         .generate()
-        // Unwrap the Result and panic on failure.
         .expect("Unable to generate bindings");
 
-    // Write the bindings to the src/bindings.rs file.
     let out_path =
         PathBuf::from(env::var("OUT_DIR").expect("Failed to get OUT_DIR environment variable"));
     bindings
@@ -166,15 +162,15 @@ fn verify_release_is_immutable() {
 
 /// Returns `true` if the release API JSON reports `"immutable": true`.
 fn release_json_is_immutable(body: &str) -> bool {
-    json_bool_field(body, "immutable").unwrap_or(false)
+    json_field(body, "immutable").is_some_and(|value| value.starts_with("true"))
 }
 
-/// Reads a top-level `"key": <bool>` field out of a JSON object, scanning the payload
-/// directly to avoid a JSON-parser build dependency.
-fn json_bool_field(json: &str, key: &str) -> Option<bool> {
+/// Returns the JSON text immediately following a top-level `"key":`, with leading
+/// whitespace trimmed, scanning the payload directly to avoid a JSON-parser build
+/// dependency.
+fn json_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     let (_, after_key) = json.split_once(&format!("\"{key}\""))?;
-    let after_colon = after_key.trim_start().strip_prefix(':')?.trim_start();
-    Some(after_colon.starts_with("true"))
+    Some(after_key.trim_start().strip_prefix(':')?.trim_start())
 }
 
 /// Regenerates `targets.rs` from the latest GitHub release and stops the build.
@@ -219,7 +215,7 @@ fn update_targets() -> ! {
             Some((target_name, static_crt, sha256))
         })
         .collect();
-    targets.sort_by(|a, b| a.0.cmp(b.0).then(b.1.cmp(&a.1)));
+    targets.sort_by_key(|&(name, static_crt, _)| (name, std::cmp::Reverse(static_crt)));
 
     fs::write("targets.rs", render_targets_file(tag, &targets))
         .expect("Failed to write targets.rs");
@@ -246,6 +242,7 @@ fn render_targets_file(tag: &str, targets: &[(&str, bool, &str)]) -> String {
          //! editing it by hand.\n\n\
          /// A prebuilt archive this crate can download for one target triple and CRT linkage.\n\
          pub struct Target {\n\
+         /// Target triple, e.g. `\"x86_64-linux-gnu\"`.\n\
          pub name: &'static str,\n\
          /// Whether this archive links the CRT statically. Only targets that publish more\n\
          /// than one archive (currently just MSVC) select between builds using this;\n\
@@ -274,9 +271,7 @@ fn render_targets_file(tag: &str, targets: &[(&str, bool, &str)]) -> String {
 /// Reads a top-level `"key": "<string>"` field out of a JSON object.
 #[cfg(feature = "update_targets")]
 fn json_string_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let (_, after_key) = json.split_once(&format!("\"{key}\""))?;
-    let after_colon = after_key.trim_start().strip_prefix(':')?.trim_start();
-    let rest = after_colon.strip_prefix('"')?;
+    let rest = json_field(json, key)?.strip_prefix('"')?;
     Some(&rest[..rest.find('"')?])
 }
 
@@ -284,9 +279,7 @@ fn json_string_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 /// between the array's brackets.
 #[cfg(feature = "update_targets")]
 fn json_array_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let (_, after_key) = json.split_once(&format!("\"{key}\""))?;
-    let after_colon = after_key.trim_start().strip_prefix(':')?.trim_start();
-    let body = after_colon.strip_prefix('[')?;
+    let body = json_field(json, key)?.strip_prefix('[')?;
     Some(&body[..find_closing_bracket(body)?])
 }
 

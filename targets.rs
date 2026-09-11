@@ -6,6 +6,7 @@
 
 /// A prebuilt archive this crate can download for one target triple and CRT linkage.
 pub struct Target {
+    /// Target triple, e.g. `"x86_64-linux-gnu"`.
     pub name: &'static str,
     /// Whether this archive links the CRT statically. Only targets that publish more
     /// than one archive (currently just MSVC) select between builds using this;

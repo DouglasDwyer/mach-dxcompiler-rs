@@ -1,20 +1,22 @@
 //! Downloads and statically links the `mach-dxcompiler` C library.
+//!
+//! Exactly one of the normal build or the `update_targets` tool runs per invocation
+//! (see `main` below), so whichever one the enabled features didn't select is unused;
+//! suppress the resulting warnings crate-wide rather than item by item.
+#![cfg_attr(feature = "update_targets", allow(dead_code, unused_imports))]
 
 /// Generated release data: the current release tag and its per-target checksums.
-#[cfg(not(feature = "update_targets"))]
 mod targets;
 /// The `update_targets` feature's tool for regenerating `targets.rs`.
 #[cfg(feature = "update_targets")]
 mod update_targets;
 
 use std::process::Command;
-#[cfg(not(feature = "update_targets"))]
 use std::{
     env, fs,
     io::ErrorKind::NotFound,
     path::{Path, PathBuf},
 };
-#[cfg(not(feature = "update_targets"))]
 use targets::{AVAILABLE_TARGETS, RELEASE_TAG};
 
 /// Owner of the GitHub repository hosting the prebuilt `mach-dxcompiler` releases.
@@ -23,7 +25,6 @@ const RELEASE_REPO_OWNER: &str = "DouglasDwyer";
 const RELEASE_REPO_NAME: &str = "mach-dxcompiler";
 
 /// A prebuilt archive this crate can download for one target triple and CRT linkage.
-#[cfg(not(feature = "update_targets"))]
 struct Target {
     /// Target triple, e.g. `"x86_64-linux-gnu"`.
     pub name: &'static str,
@@ -36,7 +37,6 @@ struct Target {
 }
 
 /// A prebuilt release archive to download and link.
-#[cfg(not(feature = "update_targets"))]
 struct ReleaseArtifact {
     /// URL of the `.tar.gz` archive.
     pub url: String,
@@ -73,7 +73,7 @@ fn main() {
 }
 
 /// Generates C API bindings.
-#[cfg(all(feature = "cbindings", not(feature = "update_targets")))]
+#[cfg(feature = "cbindings")]
 fn generate_bindings() {
     let bindings = bindgen::Builder::default()
         .rust_target(bindgen::RustTarget::Stable_1_73)
@@ -92,11 +92,7 @@ fn generate_bindings() {
 /// is compatible with the features introduced in Visual Studio 2022 version 17.11.
 /// It retrieves the compiler version using the `cl.exe` executable and compares it against
 /// a predefined minimum version. Panics if the current version is lower than the required minimum version.
-#[cfg(all(
-    feature = "msvc_version_validation",
-    target_env = "msvc",
-    not(feature = "update_targets")
-))]
+#[cfg(all(feature = "msvc_version_validation", target_env = "msvc"))]
 fn validate_msvc_version() {
     let target = std::env::var("TARGET").expect("Faild to get TARGET environment");
 
@@ -160,7 +156,6 @@ fn fetch_release_json(path: &str) -> String {
 /// cannot be determined via the GitHub REST API.
 ///
 /// [immutable release]: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases
-#[cfg(not(feature = "update_targets"))]
 fn verify_release_is_immutable() {
     let body = fetch_release_json(&format!("tags/{RELEASE_TAG}"));
 
@@ -191,7 +186,6 @@ fn json_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 /// Verifies that the downloaded archive's SHA-256 matches `expected`, pinning the
 /// exact native-binary bytes that get linked. Panics if the archive cannot be read
 /// or its digest does not match.
-#[cfg(not(feature = "update_targets"))]
 fn verify_checksum(file_path: &Path, expected: &str) {
     let bytes = fs::read(file_path).unwrap_or_else(|e| {
         panic!(
@@ -218,7 +212,6 @@ fn verify_checksum(file_path: &Path, expected: &str) {
 }
 
 /// Computes the SHA-256 digest of `data`, returned as lowercase hex.
-#[cfg(not(feature = "update_targets"))]
 fn sha256_hex(data: &[u8]) -> String {
     use std::fmt::Write;
 
@@ -233,7 +226,6 @@ fn sha256_hex(data: &[u8]) -> String {
 /// target whose CRT linkage matches `static_crt`, falling back to whatever's published
 /// for that name; only targets with more than one published archive (currently just
 /// MSVC) name a dynamically-linked build differently.
-#[cfg(not(feature = "update_targets"))]
 fn get_target_artifact(static_crt: bool) -> ReleaseArtifact {
     let base_url = format!("https://github.com/{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}/releases");
     let arch = env::var("CARGO_CFG_TARGET_ARCH").expect("Failed to get architecture");
@@ -272,7 +264,6 @@ fn get_target_artifact(static_crt: bool) -> ReleaseArtifact {
 }
 
 /// Downloads the provided URL to a file.
-#[cfg(not(feature = "update_targets"))]
 fn download_released_library(url: &str, file_path: &Path) {
     match Command::new("curl")
         .arg("--location")
@@ -306,7 +297,6 @@ fn download_released_library(url: &str, file_path: &Path) {
 
 /// Extracts the file at the provided path as a `.tar.gz` file.
 /// The contents are extracted to the current directory.
-#[cfg(not(feature = "update_targets"))]
 fn extract_tar_gz(path: &Path, output_dir: &Path) {
     let result = Command::new("tar")
         .current_dir(output_dir)
@@ -322,7 +312,6 @@ fn extract_tar_gz(path: &Path, output_dir: &Path) {
 }
 
 /// Determines whether the CRT is being statically or dynamically linked.
-#[cfg(not(feature = "update_targets"))]
 fn static_crt() -> bool {
     env::var("CARGO_ENCODED_RUSTFLAGS")
         .map(|flags| flags.contains("target-feature=+crt-static"))

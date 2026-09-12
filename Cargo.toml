@@ -22,9 +22,9 @@ cbindings = ["dep:bindgen"]
 msvc_version_validation = ["dep:cc"]
 # Maintainer-only: makes build.rs regenerate targets.rs from the latest immutable
 # GitHub release instead of building. See update_targets.rs for usage.
-update_targets = []
+internal_update_targets = []
 
 
 [package.metadata."docs.rs"]
-# Not all-features: update_targets would make build.rs fail instead of documenting.
+# Not all-features: internal_update_targets would make build.rs fail instead of documenting.
 features = ["cbindings"]

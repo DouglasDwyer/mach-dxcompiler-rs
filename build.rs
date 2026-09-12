@@ -1,14 +1,10 @@
 //! Downloads and statically links the `mach-dxcompiler` C library.
-//!
-//! Exactly one of the normal build or the `update_targets` tool runs per invocation
-//! (see `main` below), so whichever one the enabled features didn't select is unused;
-//! suppress the resulting warnings crate-wide rather than item by item.
-#![cfg_attr(feature = "update_targets", allow(dead_code, unused_imports))]
+#![cfg_attr(feature = "internal_update_targets", allow(dead_code, unused_imports))]
 
 /// Generated release data: the current release tag and its per-target checksums.
 mod targets;
-/// The `update_targets` feature's tool for regenerating `targets.rs`.
-#[cfg(feature = "update_targets")]
+/// The `internal_update_targets` feature's tool for regenerating `targets.rs`.
+#[cfg(feature = "internal_update_targets")]
 mod update_targets;
 
 use std::process::Command;
@@ -45,7 +41,7 @@ struct ReleaseArtifact {
 }
 
 /// Downloads and links the static DXC binary.
-#[cfg(not(feature = "update_targets"))]
+#[cfg(not(feature = "internal_update_targets"))]
 fn main() {
     println!("cargo:rerun-if-changed=msvc_version.c");
     println!("cargo:rerun-if-changed=mach_dxc.h");
@@ -67,7 +63,7 @@ fn main() {
 
 /// Regenerates `targets.rs` instead of building, since the two are mutually exclusive:
 /// there's no library to link until `targets.rs` reflects a real, immutable release.
-#[cfg(feature = "update_targets")]
+#[cfg(feature = "internal_update_targets")]
 fn main() {
     update_targets::run();
 }
@@ -222,10 +218,7 @@ fn sha256_hex(data: &[u8]) -> String {
     hex
 }
 
-/// Gets the release archive from which the DXC binary should be downloaded. Prefers a
-/// target whose CRT linkage matches `static_crt`, falling back to whatever's published
-/// for that name; only targets with more than one published archive (currently just
-/// MSVC) name a dynamically-linked build differently.
+/// Gets the download URL and metadata for the appropriate DXC binary.
 fn get_target_artifact(static_crt: bool) -> ReleaseArtifact {
     let base_url = format!("https://github.com/{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}/releases");
     let arch = env::var("CARGO_CFG_TARGET_ARCH").expect("Failed to get architecture");

@@ -1,23 +1,59 @@
 //! Downloads and statically links the `mach-dxcompiler` C library.
+#![cfg_attr(feature = "internal_update_targets", allow(dead_code, unused_imports))]
 
-use std::env;
+/// Generated release data: the current release tag and its per-target checksums.
+mod targets;
+/// The `internal_update_targets` feature's tool for regenerating `targets.rs`.
+#[cfg(feature = "internal_update_targets")]
+mod update_targets;
+
 use std::process::Command;
 use std::{
-    fs,
+    env, fs,
     io::ErrorKind::NotFound,
     path::{Path, PathBuf},
 };
+use targets::{AVAILABLE_TARGETS, RELEASE_TAG};
+
+/// Owner of the GitHub repository hosting the prebuilt `mach-dxcompiler` releases.
+const RELEASE_REPO_OWNER: &str = "DouglasDwyer";
+/// Name of the GitHub repository hosting the prebuilt `mach-dxcompiler` releases.
+const RELEASE_REPO_NAME: &str = "mach-dxcompiler";
+
+/// A prebuilt archive this crate can download for one target triple and CRT linkage.
+struct Target {
+    /// Target triple, e.g. `"x86_64-linux-gnu"`.
+    pub name: &'static str,
+    /// Whether this archive links the CRT statically. Only targets that publish more
+    /// than one archive (currently just MSVC) select between builds using this;
+    /// every other target's sole entry is used regardless of its value.
+    pub static_crt: bool,
+    /// SHA-256 of the archive.
+    pub sha256: &'static str,
+}
+
+/// A prebuilt release archive to download and link.
+struct ReleaseArtifact {
+    /// URL of the `.tar.gz` archive.
+    pub url: String,
+    /// Expected SHA-256 of the archive.
+    pub sha256: &'static str,
+}
 
 /// Downloads and links the static DXC binary.
+#[cfg(not(feature = "internal_update_targets"))]
 fn main() {
     println!("cargo:rerun-if-changed=msvc_version.c");
     println!("cargo:rerun-if-changed=mach_dxc.h");
+    println!("cargo:rerun-if-changed=targets.rs");
     #[cfg(all(feature = "msvc_version_validation", target_env = "msvc"))]
     validate_msvc_version();
+    verify_release_is_immutable();
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("Failed to get OUT_DIR environment"));
-    let target_url = get_target_url(static_crt());
+    let artifact = get_target_artifact(static_crt());
     let file_path = out_dir.join("machdxcompiler.tar.gz");
-    download_released_library(&target_url, &file_path);
+    download_released_library(&artifact.url, &file_path);
+    verify_checksum(&file_path, artifact.sha256);
     extract_tar_gz(&file_path, &out_dir);
     #[cfg(feature = "cbindings")]
     generate_bindings();
@@ -39,20 +75,22 @@ fn link_binary(out_dir: &Path) {
     println!("cargo:rustc-link-search=native={}", out_dir.display());
 }
 
+/// Regenerates `targets.rs` instead of building, since the two are mutually exclusive:
+/// there's no library to link until `targets.rs` reflects a real, immutable release.
+#[cfg(feature = "internal_update_targets")]
+fn main() {
+    update_targets::run();
+}
+
 /// Generates C API bindings.
 #[cfg(feature = "cbindings")]
 fn generate_bindings() {
     let bindings = bindgen::Builder::default()
         .rust_target(bindgen::RustTarget::Stable_1_73)
-        // The input header we would like to generate
-        // bindings for.
         .header("mach_dxc.h")
-        // Finish the builder and generate the bindings.
         .generate()
-        // Unwrap the Result and panic on failure.
         .expect("Unable to generate bindings");
 
-    // Write the bindings to the src/bindings.rs file.
     let out_path =
         PathBuf::from(env::var("OUT_DIR").expect("Failed to get OUT_DIR environment variable"));
     bindings
@@ -101,43 +139,135 @@ fn validate_msvc_version() {
     }
 }
 
-/// Gets the URL from which the DXC binary should be downloaded.
-fn get_target_url(static_crt: bool) -> String {
-    const BASE_URL: &str = "https://github.com/DouglasDwyer/mach-dxcompiler/releases";
-    const LATEST_RELEASE: &str = "2024.11.22+284d956.1";
-    const AVAILABLE_TARGETS: &[&str] = &[
-        "x86_64-linux-gnu",
-        "x86_64-linux-musl",
-        "aarch64-linux-gnu",
-        "aarch64-linux-musl",
-        "x86_64-windows-gnu",
-        "x86_64-windows-msvc",
-        "aarch64-windows-gnu",
-        "x86_64-macos-none",
-        "aarch64-macos-none",
-    ];
+/// Fetches the JSON body of `GET /repos/{owner}/{repo}/releases/{path}` from the
+/// GitHub REST API. Panics if the request fails or the response isn't valid UTF-8.
+fn fetch_release_json(path: &str) -> String {
+    let api_url = format!(
+        "https://api.github.com/repos/{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}/releases/{path}"
+    );
+
+    let output = Command::new("curl")
+        .arg("--location")
+        .arg(&api_url)
+        .output()
+        .expect("Failed to start Curl to query the GitHub releases API");
+    if !output.status.success() {
+        panic!(
+            "Failed to query the GitHub releases API at {api_url}:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    String::from_utf8(output.stdout).expect("GitHub releases API returned a non-UTF-8 response")
+}
+
+/// Verifies that [`RELEASE_TAG`] is an [immutable release], so its assets cannot be
+/// swapped out after publication. Panics if the release is not immutable or its status
+/// cannot be determined via the GitHub REST API.
+///
+/// [immutable release]: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases
+fn verify_release_is_immutable() {
+    let body = fetch_release_json(&format!("tags/{RELEASE_TAG}"));
+
+    if !release_json_is_immutable(&body) {
+        panic!(
+            "Refusing to download a mutable GitHub release.\n\n\
+             `{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}` release `{RELEASE_TAG}` is not an immutable \
+             release, so its assets could be replaced after publication without any change to this \
+             crate's source. Publish an immutable release and bump `RELEASE_TAG` before building.\n\
+             https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases"
+        );
+    }
+}
+
+/// Returns `true` if the release API JSON reports `"immutable": true`.
+fn release_json_is_immutable(body: &str) -> bool {
+    json_field(body, "immutable").is_some_and(|value| value.starts_with("true"))
+}
+
+/// Returns the JSON text immediately following a top-level `"key":`, with leading
+/// whitespace trimmed, scanning the payload directly to avoid a JSON-parser build
+/// dependency.
+fn json_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let (_, after_key) = json.split_once(&format!("\"{key}\""))?;
+    Some(after_key.trim_start().strip_prefix(':')?.trim_start())
+}
+
+/// Verifies that the downloaded archive's SHA-256 matches `expected`, pinning the
+/// exact native-binary bytes that get linked. Panics if the archive cannot be read
+/// or its digest does not match.
+fn verify_checksum(file_path: &Path, expected: &str) {
+    let bytes = fs::read(file_path).unwrap_or_else(|e| {
+        panic!(
+            "Failed to read downloaded archive {} for checksum verification: {e}",
+            file_path.display()
+        )
+    });
+    let actual = sha256_hex(&bytes);
+
+    if !actual.eq_ignore_ascii_case(expected) {
+        let _ = fs::remove_file(file_path);
+        panic!(
+            "Checksum mismatch for downloaded archive {}.\n\
+             \n\
+             expected SHA-256: {expected}\n\
+             actual SHA-256:   {actual}\n\
+             \n\
+             The downloaded archive does not match the checksum pinned in build.rs. The \
+             release asset may have been tampered with, or `AVAILABLE_TARGETS` may be stale \
+             for release `{RELEASE_TAG}`. Refusing to link an unverified binary.",
+            file_path.display()
+        );
+    }
+}
+
+/// Computes the SHA-256 digest of `data`, returned as lowercase hex.
+fn sha256_hex(data: &[u8]) -> String {
+    use std::fmt::Write;
+
+    let mut hex = String::with_capacity(64);
+    for byte in lhash::sha256(data) {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// Gets the download URL and metadata for the appropriate DXC binary.
+fn get_target_artifact(static_crt: bool) -> ReleaseArtifact {
+    let base_url = format!("https://github.com/{RELEASE_REPO_OWNER}/{RELEASE_REPO_NAME}/releases");
     let arch = env::var("CARGO_CFG_TARGET_ARCH").expect("Failed to get architecture");
     let mut os = env::var("CARGO_CFG_TARGET_OS").expect("Failed to get os");
-    // apple-darwin => macos
     if env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default() == "apple" && os == "darwin" {
         os = "macos".to_owned();
     }
-    // CARGO_CFG_TARGET_ENV may be empty
     let mut abi = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     if abi.is_empty() {
         abi = "none".to_owned();
     }
-    let target = format!("{arch}-{os}-{abi}");
+    let target_name = format!("{arch}-{os}-{abi}");
 
-    if !AVAILABLE_TARGETS.contains(&target.as_str()) {
-        panic!("Unsupported target: {target}\nCheck supported targets on {BASE_URL}");
-    }
-    let crt = if abi == "msvc" && !static_crt {
+    let candidates: Vec<_> = AVAILABLE_TARGETS
+        .iter()
+        .filter(|t| t.name == target_name)
+        .collect();
+    let target = candidates
+        .iter()
+        .copied()
+        .max_by_key(|t| t.static_crt == static_crt)
+        .unwrap_or_else(|| {
+            panic!("Unsupported target: {target_name}\nCheck supported targets on {base_url}")
+        });
+
+    let crt = if candidates.len() > 1 && !target.static_crt {
         "Dynamic_lib"
     } else {
         "lib"
     };
-    format!("{BASE_URL}/download/{LATEST_RELEASE}/{target}_ReleaseFast_{crt}.tar.gz")
+
+    ReleaseArtifact {
+        url: format!("{base_url}/download/{RELEASE_TAG}/{target_name}_ReleaseFast_{crt}.tar.gz"),
+        sha256: target.sha256,
+    }
 }
 
 /// Downloads the provided URL to a file.

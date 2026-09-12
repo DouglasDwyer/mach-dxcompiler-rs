@@ -3,7 +3,8 @@
 /// Generated release data: the current release tag and its per-target checksums.
 #[cfg(not(feature = "update_targets"))]
 mod targets;
-/// The `Target` schema, plus the `update_targets` feature's regeneration tool.
+/// The `update_targets` feature's tool for regenerating `targets.rs`.
+#[cfg(feature = "update_targets")]
 mod update_targets;
 
 use std::process::Command;
@@ -20,6 +21,19 @@ use targets::{AVAILABLE_TARGETS, RELEASE_TAG};
 const RELEASE_REPO_OWNER: &str = "DouglasDwyer";
 /// Name of the GitHub repository hosting the prebuilt `mach-dxcompiler` releases.
 const RELEASE_REPO_NAME: &str = "mach-dxcompiler";
+
+/// A prebuilt archive this crate can download for one target triple and CRT linkage.
+#[cfg(not(feature = "update_targets"))]
+struct Target {
+    /// Target triple, e.g. `"x86_64-linux-gnu"`.
+    pub name: &'static str,
+    /// Whether this archive links the CRT statically. Only targets that publish more
+    /// than one archive (currently just MSVC) select between builds using this;
+    /// every other target's sole entry is used regardless of its value.
+    pub static_crt: bool,
+    /// SHA-256 of the archive.
+    pub sha256: &'static str,
+}
 
 /// A prebuilt release archive to download and link.
 #[cfg(not(feature = "update_targets"))]

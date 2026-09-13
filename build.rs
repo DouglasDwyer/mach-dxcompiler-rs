@@ -73,6 +73,36 @@ fn link_binary(out_dir: &Path) {
     }
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
+    link_gnu_abi_runtime();
+}
+
+/// On linux-gnu and windows-gnu, `machdxcompiler` is compiled against the target's own, real
+/// libstdc++ (not bundled into the archive -- see the mach-dxcompiler-rs#12 follow-up report and
+/// mach-dxcompiler's `GnuLibstdcxx` in build.zig), so the consumer supplies it, same as any other
+/// C++ static library. windows-msvc needs none of this: its .lib carries `/DEFAULTLIB`
+/// directives that auto-request the matching CRT from the consumer's own Visual Studio install.
+fn link_gnu_abi_runtime() {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    match (target_os.as_str(), target_env.as_str()) {
+        ("linux", "gnu") => {
+            println!("cargo:rustc-link-lib=stdc++");
+        }
+        ("windows", "gnu") => {
+            // mingw-w64 implements the "secure" CRT functions DXC calls (e.g. `_snprintf_s`)
+            // exclusively via UCRT's common entry points, even under a classic msvcrt.dll build
+            // (this is mingw-w64's own hybrid-CRT design, not specific to this crate) -- link
+            // UCRT alongside the default msvcrt for those. The two runtimes both define a
+            // handful of legacy functions identically (e.g. `mbsrtowcs`); tell the linker to
+            // keep the first definition instead of erroring on the duplicate.
+            println!("cargo:rustc-link-lib=ucrt");
+            println!("cargo:rustc-link-lib=ole32");
+            println!("cargo:rustc-link-lib=oleaut32");
+            println!("cargo:rustc-link-lib=version");
+            println!("cargo:rustc-link-arg=-Wl,--allow-multiple-definition");
+        }
+        _ => {}
+    }
 }
 
 /// Regenerates `targets.rs` instead of building, since the two are mutually exclusive:

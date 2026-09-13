@@ -3,7 +3,7 @@ name = "mach-dxcompiler-rs"
 description = """
 Prebuilt, statically-linked DXC.
 """
-version = "0.1.5+2026.09.11-087be1c.1"
+version = "0.1.6+2026.09.13-c831d94.1"
 edition = "2021"
 license = "MIT"
 readme = "README.md"

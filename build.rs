@@ -7,6 +7,7 @@ mod targets;
 #[cfg(feature = "internal_update_targets")]
 mod update_targets;
 
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use std::{
     env, fs,
@@ -73,6 +74,232 @@ fn link_binary(out_dir: &Path) {
     }
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
+
+    // `machdxcompiler` is a C++ library, so every "gnu"-ABI target (unlike MSVC, which
+    // always statically links its own CRT/STL by default) needs its C++ runtime linked
+    // in explicitly; the prebuilt archives don't bundle it.
+    if os == "windows" && abi == "gnu" {
+        link_windows_gnu_runtime(out_dir);
+    } else if os == "linux" && abi == "gnu" {
+        // libstdc++.so is part of the base system on essentially every Linux distribution.
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+    }
+}
+
+/// Links the C++ runtime and the handful of UCRT-only CRT entry points that
+/// `machdxcompiler`'s windows-gnu build references but classic mingw-w64's msvcrt-based
+/// CRT does not provide, plus the COM APIs (`ole32`/`oleaut32`) it calls into.
+fn link_windows_gnu_runtime(out_dir: &Path) {
+    let compiler = target_linker_command();
+
+    // Statically link libstdc++/libgcc_eh (matching every other "gnu"-ABI target's C++
+    // runtime), located via the configured compiler rather than a hardcoded path so this
+    // works for any mingw-w64 toolchain, not just this host's particular layout.
+    for lib in ["stdc++", "gcc_eh"] {
+        link_static_lib_via_compiler(&compiler, lib);
+    }
+
+    // COM APIs used by DXC (SysAllocStringLen/SysFreeString, CoTaskMemAlloc/Free/Realloc).
+    println!("cargo:rustc-link-lib=dylib=ole32");
+    println!("cargo:rustc-link-lib=dylib=oleaut32");
+
+    build_ucrt_shim(&compiler, out_dir);
+}
+
+/// Returns the linker command Cargo will invoke for this build, honoring
+/// `CARGO_TARGET_<TRIPLE>_LINKER` when the user has set it (as is typical when
+/// cross-compiling), and otherwise falling back to `gcc`, Rust's own default linker for
+/// this target.
+fn target_linker_command() -> String {
+    let target = env::var("TARGET").expect("Failed to get TARGET environment");
+    let key = format!(
+        "CARGO_TARGET_{}_LINKER",
+        target.to_uppercase().replace('-', "_")
+    );
+    env::var(&key).unwrap_or_else(|_| "gcc".to_string())
+}
+
+/// Derives the binutils tool (e.g. `ar`, `nm`) matching the given linker command, e.g.
+/// `x86_64-w64-mingw32-gcc` -> `x86_64-w64-mingw32-ar`, or plain `gcc` -> `ar`.
+fn binutils_tool(compiler: &str, tool: &str) -> String {
+    match compiler.strip_suffix("-gcc") {
+        Some(prefix) => format!("{prefix}-{tool}"),
+        None => tool.to_string(),
+    }
+}
+
+/// Asks `compiler` where it would find `file_name` (via `-print-file-name`), returning
+/// its full path if the compiler actually located it.
+fn compiler_file_path(compiler: &str, file_name: &str) -> Option<PathBuf> {
+    let output = Command::new(compiler)
+        .arg(format!("-print-file-name={file_name}"))
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run `{compiler} -print-file-name={file_name}`: {e}"));
+    let path = String::from_utf8(output.stdout).unwrap_or_else(|e| {
+        panic!("`{compiler} -print-file-name={file_name}` produced non-UTF-8 output: {e}")
+    });
+    let path = path.trim();
+    (!path.is_empty() && path != file_name).then(|| PathBuf::from(path))
+}
+
+/// Emits the `cargo:rustc-link-*` directives to statically link `lib{lib}.a`, locating it
+/// via the configured compiler.
+fn link_static_lib_via_compiler(compiler: &str, lib: &str) {
+    let file_name = format!("lib{lib}.a");
+    let path = compiler_file_path(compiler, &file_name).unwrap_or_else(|| {
+        panic!(
+            "Could not locate `{file_name}` via `{compiler} -print-file-name={file_name}`.\n\
+             A mingw-w64 GCC toolchain (providing `{file_name}`) is required to link \
+             `machdxcompiler` for windows-gnu targets."
+        )
+    });
+    let dir = path
+        .parent()
+        .unwrap_or_else(|| panic!("`{}` has no parent directory", path.display()));
+    println!("cargo:rustc-link-search=native={}", dir.display());
+    println!("cargo:rustc-link-lib=static={lib}");
+}
+
+/// A handful of UCRT-only CRT entry points (`__stdio_common_vsprintf_s`,
+/// `__stdio_common_vsnprintf_s`, `__intrinsic_setjmpex`) that `machdxcompiler`'s
+/// windows-gnu build calls but classic mingw-w64's msvcrt-based CRT does not provide.
+///
+/// Linking the whole UCRT import library (`-lucrt`) alongside the default msvcrt one
+/// conflicts (both define compatibility symbols like `mbsrtowcs`), so instead this
+/// extracts just the objects that transitively provide the needed symbols out of
+/// `libucrt.a` and archives those alone.
+const UCRT_SHIM_SYMBOLS: &[&str] = &[
+    "__stdio_common_vsprintf_s",
+    "__stdio_common_vsnprintf_s",
+    "__intrinsic_setjmpex",
+];
+
+/// Builds and links a small static archive providing [`UCRT_SHIM_SYMBOLS`], extracted
+/// from the mingw-w64 toolchain's own `libucrt.a`.
+fn build_ucrt_shim(compiler: &str, out_dir: &Path) {
+    let ar = binutils_tool(compiler, "ar");
+    let nm = binutils_tool(compiler, "nm");
+
+    let ucrt_path = compiler_file_path(compiler, "libucrt.a").unwrap_or_else(|| {
+        panic!("Could not locate `libucrt.a` via `{compiler} -print-file-name=libucrt.a`.")
+    });
+
+    let members = archive_member_symbols(&nm, &ucrt_path);
+    let selected = select_transitive_closure(&members, UCRT_SHIM_SYMBOLS, &ucrt_path);
+
+    let shim_dir = out_dir.join("ucrt_shim");
+    fs::create_dir_all(&shim_dir)
+        .unwrap_or_else(|e| panic!("Failed to create {}: {e}", shim_dir.display()));
+
+    run_command(
+        Command::new(&ar)
+            .arg("x")
+            .arg(&ucrt_path)
+            .args(&selected)
+            .current_dir(&shim_dir),
+    );
+
+    let shim_lib = "machdxcompiler_ucrt_shim";
+    run_command(
+        Command::new(&ar)
+            .arg("rcs")
+            .arg(format!("lib{shim_lib}.a"))
+            .args(&selected)
+            .current_dir(&shim_dir),
+    );
+
+    println!("cargo:rustc-link-search=native={}", shim_dir.display());
+    println!("cargo:rustc-link-lib=static={shim_lib}");
+}
+
+/// Runs `nm` over every member of `archive` in one pass, returning each member's defined
+/// and undefined symbols, keyed by member name.
+fn archive_member_symbols(nm: &str, archive: &Path) -> HashMap<String, (Vec<String>, Vec<String>)> {
+    let output = Command::new(nm)
+        .arg(archive)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run `{nm}` on {}: {e}", archive.display()));
+    let text = String::from_utf8(output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "`{nm}` produced non-UTF-8 output for {}: {e}",
+            archive.display()
+        )
+    });
+
+    let mut members: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
+    let mut current: Option<&mut (Vec<String>, Vec<String>)> = None;
+    for line in text.lines() {
+        if let Some(name) = line.strip_suffix(':') {
+            current = Some(members.entry(name.to_string()).or_default());
+            continue;
+        }
+        let Some(current) = current.as_mut() else {
+            continue;
+        };
+        // Symbol lines are `<addr> <type> <name>` (defined) or `<spaces> U <name>`
+        // (undefined); either way the type char and name are the last two tokens.
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.len() < 2 {
+            continue;
+        }
+        let name = tokens[tokens.len() - 1];
+        let ty = tokens[tokens.len() - 2];
+        if ty == "U" {
+            current.1.push(name.to_string());
+        } else {
+            current.0.push(name.to_string());
+        }
+    }
+    members
+}
+
+/// Starting from `roots`, follows each selected member's undefined symbols to whichever
+/// other member of the archive defines them, returning the full set of member names
+/// needed to resolve `roots` (and transitively, everything they in turn require).
+fn select_transitive_closure(
+    members: &HashMap<String, (Vec<String>, Vec<String>)>,
+    roots: &[&str],
+    archive: &Path,
+) -> Vec<String> {
+    let mut defined_in: HashMap<&str, &str> = HashMap::new();
+    for (member, (defined, _)) in members {
+        for symbol in defined {
+            defined_in.entry(symbol.as_str()).or_insert(member.as_str());
+        }
+    }
+
+    let mut selected: Vec<String> = Vec::new();
+    let mut seen_members: HashSet<&str> = HashSet::new();
+    let mut worklist: Vec<&str> = roots.to_vec();
+    while let Some(symbol) = worklist.pop() {
+        let Some(&member) = defined_in.get(symbol) else {
+            if roots.contains(&symbol) {
+                panic!(
+                    "`{}` does not define `{symbol}`; cannot build UCRT compatibility shim",
+                    archive.display()
+                );
+            }
+            continue;
+        };
+        if !seen_members.insert(member) {
+            continue;
+        }
+        selected.push(member.to_string());
+        let (_, undefined) = &members[member];
+        worklist.extend(undefined.iter().map(String::as_str));
+    }
+    selected
+}
+
+/// Runs `command`, panicking with its program name and status if it fails to start or
+/// exits unsuccessfully.
+fn run_command(command: &mut Command) {
+    let status = command
+        .status()
+        .unwrap_or_else(|e| panic!("Failed to run `{:?}`: {e}", command.get_program()));
+    if !status.success() {
+        panic!("`{:?}` failed: {status}", command.get_program());
+    }
 }
 
 /// Regenerates `targets.rs` instead of building, since the two are mutually exclusive:

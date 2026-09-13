@@ -3,58 +3,58 @@
 use crate::Target;
 
 /// Release tag the prebuilt binaries are downloaded from.
-pub const RELEASE_TAG: &str = "2026.09.11+087be1c.1";
+pub const RELEASE_TAG: &str = "2026.09.13+c831d94.1";
 
 /// Every archive this crate can download, for [`RELEASE_TAG`].
 pub const AVAILABLE_TARGETS: &[Target] = &[
     Target {
         name: "aarch64-linux-gnu",
         static_crt: true,
-        sha256: "73db50a1315f51458cd80015e49147a424637f95a11c0ff1820c9999e8ff2fbd",
+        sha256: "48f57d7ec8e9fa8edf8ca6925207dd463badde3f62c261971fa6da462e708051",
     },
     Target {
         name: "aarch64-linux-musl",
         static_crt: true,
-        sha256: "689d95a60c4cb17d64bb75b34faa65712fad20523d9e82ca3aa35cc25c5b5555",
+        sha256: "e86c52f3cbf77f42f810f71de6f54e0bf4cf702174c3498b5ca95774f089d6a7",
     },
     Target {
         name: "aarch64-macos-none",
         static_crt: true,
-        sha256: "03cd4665c693267a85924f1ffd9f85629dc5668f5f39dc7bbc725595a0615adc",
+        sha256: "cea3bcb42e58761500f0d65bde680b1fa2390ae73d98faa5d7c0cdd6645a6543",
     },
     Target {
         name: "aarch64-windows-gnu",
         static_crt: true,
-        sha256: "1f3adf09facf1dc5db0db55919e69953def1c2e2effc257620b0b7ee584035a8",
+        sha256: "dd97762768cf744f93ba0c72ce16fa866d860ac54b4efca7fe9fbf143675b663",
     },
     Target {
         name: "x86_64-linux-gnu",
         static_crt: true,
-        sha256: "863c29363e016f413d2df66c786063cb4fe04905e474dfdd6a86c68fe3bfa982",
+        sha256: "e145fe00597022ba95357c8f8391f8aaf918950275da3039057064595b42e8be",
     },
     Target {
         name: "x86_64-linux-musl",
         static_crt: true,
-        sha256: "b0127fcfb0023489f6d1bff38135780da995a54b06e3afb1a4be5d1b34cec965",
+        sha256: "63173f8557dd450e32535141a869be16dfef6e5f887cbdae63c09e6d719472ee",
     },
     Target {
         name: "x86_64-macos-none",
         static_crt: true,
-        sha256: "cbb9585bc9cfa8ef746bcd496d769bb36cb6e0d5291200affd71edc23f0d6881",
+        sha256: "a45f383998ac8df219b5f4ea4c1a0a78bb03b20de03f93b35c070caf57faab50",
     },
     Target {
         name: "x86_64-windows-gnu",
         static_crt: true,
-        sha256: "86399396eb7538aa74c980b4c045e288729ea74f72662629adde0e605a676419",
+        sha256: "4fd00aa47607a53a38c1fbabab0934053520b7e17c1430fe306e01735d4af58e",
     },
     Target {
         name: "x86_64-windows-msvc",
         static_crt: true,
-        sha256: "f5322f221b5c19c36d2ce6af7bf44bb236969b2284254807262ef07b80a81d4b",
+        sha256: "2cb66262af27b66cb14f4c5cd3e97c3736d072db24d70b3c5b4ddc5e05a1ec29",
     },
     Target {
         name: "x86_64-windows-msvc",
         static_crt: false,
-        sha256: "3c0d35d55fe3e7b3b288b80b0fd1bcd416598da422ac34ea44194bac7842a513",
+        sha256: "6c03f39c8fd6fed5e860ad1675e9c52a3812ad550ccb04b743314d4a226b2ba8",
     },
 ];

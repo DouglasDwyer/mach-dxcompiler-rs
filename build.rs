@@ -73,6 +73,18 @@ fn link_binary(out_dir: &Path) {
     }
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
+
+    if os == "windows" && abi == "gnu" {
+        // `-bundle` defers resolution to the final link instead of rustc eagerly packing
+        // the archive into this crate's own rlib.
+        println!("cargo:rustc-link-lib=static:-bundle,+whole-archive=stdc++");
+        println!("cargo:rustc-link-lib=static:-bundle,+whole-archive=gcc_eh");
+        // COM APIs used by DXC (SysAllocStringLen/SysFreeString, CoTaskMemAlloc/Free/Realloc).
+        println!("cargo:rustc-link-lib=dylib=ole32");
+        println!("cargo:rustc-link-lib=dylib=oleaut32");
+    } else if os == "linux" && abi == "gnu" {
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+    }
 }
 
 /// Regenerates `targets.rs` instead of building, since the two are mutually exclusive:

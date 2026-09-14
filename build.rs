@@ -78,73 +78,20 @@ fn link_binary(out_dir: &Path) {
     // always statically links its own CRT/STL by default) needs its C++ runtime linked
     // in explicitly; the prebuilt archives don't bundle it.
     if os == "windows" && abi == "gnu" {
-        link_windows_gnu_runtime();
+        // `-bundle` defers resolution to the final link (instead of rustc eagerly locating
+        // and packing the ~7MB archive into this crate's own rlib, which would otherwise
+        // require knowing exactly where it lives on this host); the actual linker driver
+        // already knows its own default library directories, same as it does for ole32/
+        // oleaut32 below.
+        println!("cargo:rustc-link-lib=static:-bundle=stdc++");
+        println!("cargo:rustc-link-lib=static:-bundle=gcc_eh");
+        // COM APIs used by DXC (SysAllocStringLen/SysFreeString, CoTaskMemAlloc/Free/Realloc).
+        println!("cargo:rustc-link-lib=dylib=ole32");
+        println!("cargo:rustc-link-lib=dylib=oleaut32");
     } else if os == "linux" && abi == "gnu" {
         // libstdc++.so is part of the base system on essentially every Linux distribution.
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
-}
-
-/// Links the C++ runtime and the COM APIs (`ole32`/`oleaut32`) `machdxcompiler`'s
-/// windows-gnu build calls into but doesn't bundle.
-fn link_windows_gnu_runtime() {
-    let compiler = target_linker_command();
-
-    // Statically link libstdc++/libgcc_eh (matching every other "gnu"-ABI target's C++
-    // runtime), located via the configured compiler rather than a hardcoded path so this
-    // works for any mingw-w64 toolchain, not just this host's particular layout.
-    for lib in ["stdc++", "gcc_eh"] {
-        link_static_lib_via_compiler(&compiler, lib);
-    }
-
-    // COM APIs used by DXC (SysAllocStringLen/SysFreeString, CoTaskMemAlloc/Free/Realloc).
-    println!("cargo:rustc-link-lib=dylib=ole32");
-    println!("cargo:rustc-link-lib=dylib=oleaut32");
-}
-
-/// Returns the linker command Cargo will invoke for this build, honoring
-/// `CARGO_TARGET_<TRIPLE>_LINKER` when the user has set it (as is typical when
-/// cross-compiling), and otherwise falling back to `gcc`, Rust's own default linker for
-/// this target.
-fn target_linker_command() -> String {
-    let target = env::var("TARGET").expect("Failed to get TARGET environment");
-    let key = format!(
-        "CARGO_TARGET_{}_LINKER",
-        target.to_uppercase().replace('-', "_")
-    );
-    env::var(&key).unwrap_or_else(|_| "gcc".to_string())
-}
-
-/// Asks `compiler` where it would find `file_name` (via `-print-file-name`), returning
-/// its full path if the compiler actually located it.
-fn compiler_file_path(compiler: &str, file_name: &str) -> Option<PathBuf> {
-    let output = Command::new(compiler)
-        .arg(format!("-print-file-name={file_name}"))
-        .output()
-        .unwrap_or_else(|e| panic!("Failed to run `{compiler} -print-file-name={file_name}`: {e}"));
-    let path = String::from_utf8(output.stdout).unwrap_or_else(|e| {
-        panic!("`{compiler} -print-file-name={file_name}` produced non-UTF-8 output: {e}")
-    });
-    let path = path.trim();
-    (!path.is_empty() && path != file_name).then(|| PathBuf::from(path))
-}
-
-/// Emits the `cargo:rustc-link-*` directives to statically link `lib{lib}.a`, locating it
-/// via the configured compiler.
-fn link_static_lib_via_compiler(compiler: &str, lib: &str) {
-    let file_name = format!("lib{lib}.a");
-    let path = compiler_file_path(compiler, &file_name).unwrap_or_else(|| {
-        panic!(
-            "Could not locate `{file_name}` via `{compiler} -print-file-name={file_name}`.\n\
-             A mingw-w64 GCC toolchain (providing `{file_name}`) is required to link \
-             `machdxcompiler` for windows-gnu targets."
-        )
-    });
-    let dir = path
-        .parent()
-        .unwrap_or_else(|| panic!("`{}` has no parent directory", path.display()));
-    println!("cargo:rustc-link-search=native={}", dir.display());
-    println!("cargo:rustc-link-lib=static={lib}");
 }
 
 /// Regenerates `targets.rs` instead of building, since the two are mutually exclusive:

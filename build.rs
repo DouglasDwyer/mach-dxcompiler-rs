@@ -74,22 +74,15 @@ fn link_binary(out_dir: &Path) {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
 
-    // `machdxcompiler` is a C++ library, so every "gnu"-ABI target (unlike MSVC, which
-    // always statically links its own CRT/STL by default) needs its C++ runtime linked
-    // in explicitly; the prebuilt archives don't bundle it.
     if os == "windows" && abi == "gnu" {
-        // `-bundle` defers resolution to the final link (instead of rustc eagerly locating
-        // and packing the ~7MB archive into this crate's own rlib, which would otherwise
-        // require knowing exactly where it lives on this host); the actual linker driver
-        // already knows its own default library directories, same as it does for ole32/
-        // oleaut32 below.
-        println!("cargo:rustc-link-lib=static:-bundle=stdc++");
-        println!("cargo:rustc-link-lib=static:-bundle=gcc_eh");
+        // `-bundle` defers resolution to the final link instead of rustc eagerly packing
+        // the archive into this crate's own rlib.
+        println!("cargo:rustc-link-lib=static:-bundle,+whole-archive=stdc++");
+        println!("cargo:rustc-link-lib=static:-bundle,+whole-archive=gcc_eh");
         // COM APIs used by DXC (SysAllocStringLen/SysFreeString, CoTaskMemAlloc/Free/Realloc).
         println!("cargo:rustc-link-lib=dylib=ole32");
         println!("cargo:rustc-link-lib=dylib=oleaut32");
     } else if os == "linux" && abi == "gnu" {
-        // libstdc++.so is part of the base system on essentially every Linux distribution.
         println!("cargo:rustc-link-lib=dylib=stdc++");
     }
 }

@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "mach-dxcompiler-rs"
-version = "0.1.7+2026.09.13-52a61ae.1"
+version = "0.1.8+2026.09.16-48d5a66.1"
 dependencies = [
  "bindgen",
  "cc",

@@ -1,0 +1,37 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ format('{0} {1}', matrix.platform.target, matrix.features)}}
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: x86_64-apple-darwin, os: macos-13 }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-pc-windows-msvc, os: windows-latest }
+        features: ["", "cbindings"]
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install stable toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+    - name: Build
+      run: cargo build --features "${{ matrix.features }}" --target ${{ matrix.platform.target }}
+    - name: Run tests
+      run: cargo test --features "${{ matrix.features }}" --target ${{ matrix.platform.target }}
